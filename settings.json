@@ -1,0 +1,37 @@
+{
+  "modes": {
+    "USERS_MODE": "users",
+    "TEAMS_MODE": "teams"
+  },
+  "plugin-info": {
+    "id": "container",
+    "name": "container",
+    "templates": {
+      "create": "/plugins/docker_per_team/assets/create.html",
+      "update": "/plugins/docker_per_team/assets/update.html",
+      "view": "/plugins/docker_per_team/assets/view.html"
+    },
+    "scripts": {
+      "create": "/plugins/docker_per_team/assets/create.js",
+      "update": "/plugins/docker_per_team/assets/update.js",
+      "view": "/plugins/docker_per_team/assets/view.js"
+    },
+    "base_path": "/plugins/docker_per_team/assets/"
+  },
+  "defaults": {
+    "docker_base_url": "unix:///var/run/docker.sock",
+    "docker_hostname": "",
+    "docker_api_timeout": "15",
+    "challenge_network": "csctf_challenge_net",
+    "container_expiration": "30",
+    "container_maxmemory": "0",
+    "container_maxcpu": "0",
+    "max_containers": "3",
+    "allow_challenge_volumes": "disabled",
+    "allowed_capabilities": ""
+  },
+  "blueprint": {
+    "template_folder": "templates",
+    "static_folder": "assets"
+  }
+}

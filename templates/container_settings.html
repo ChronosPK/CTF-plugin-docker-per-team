@@ -1,0 +1,143 @@
+{% extends "container_base.html" %}
+
+
+{% block menu %}
+<li class="nav-item">
+    <a class="nav-link" href="/containers/admin/dashboard">&#128279; Instances</a>
+</li>
+<li class="nav-item">
+    <a class="nav-link active" data-toggle="pill" href="#settings">Settings</a>
+</li>
+<li class="nav-item">
+    <a class="nav-link" href="/containers/admin/cheat">&#128279; Share flag</a>
+</li>
+{% endblock %}
+
+{% block panel %}
+{% include "components/errors.html" %}
+<div role="tabpanel" class="tab-pane config-section active" id="settings">
+    <form method="post" action="/containers/admin/api/settings" accept-charset="utf-8" autocomplete="off" role="form"
+        class="form-horizontal" enctype="multipart/form-data">
+        <div class="tab-content">
+            <div class="tab-pane fade show active" id="docker" role="tabpanel" aria-autocomplete="none">
+                <h5>Local Docker Settings</h5>
+                <p class="form-text text-muted">
+                    This local stack is optimized for direct container exposure on an internal Docker network.
+                    The Base URL should normally stay at <code>unix:///var/run/docker.sock</code> when CTFd runs in Docker on your machine.
+                </p>
+
+                <div class="form-group">
+                    <label for="docker_base_url">
+                        Base URL (see instructions)
+                    </label>
+                    <input class="form-control" type="text" name="docker_base_url" id="docker_base_url"
+                        placeholder="E.g. unix://var/run/docker.sock or ssh://root@example.com"
+                        value='{{ settings.docker_base_url|default("") }}' />
+                </div>
+
+                <div class="form-group">
+                    <label for="docker_hostname">
+                        Hostname Override for Direct Links
+                    </label>
+                    <input class="form-control" type="text" name="docker_hostname" id="docker_hostname"
+                        placeholder="Leave blank to use the current request host"
+                        value='{{ settings.docker_hostname|default("") }}' />
+                </div>
+                <div class="form-group">
+                    <label for="docker_api_timeout">
+                        Docker API Timeout in Seconds
+                    </label>
+                    <input class="form-control" type="number" name="docker_api_timeout" id="docker_api_timeout"
+                        placeholder="e.g. 15" value='{{ settings.docker_api_timeout|default("15") }}' />
+                </div>
+                <div class="form-group">
+                    <label for="challenge_network">
+                        Challenge Docker Network
+                    </label>
+                    <input class="form-control" type="text" name="challenge_network" id="challenge_network"
+                        placeholder="e.g. csctf_challenge_net"
+                        value='{{ settings.challenge_network|default("csctf_challenge_net") }}' />
+                    <small class="form-text text-muted">
+                        Every challenge container is attached to this existing Docker network.
+                        Keep it separate from the CTFd app network and create it with
+                        <code>com.docker.network.bridge.enable_icc=false</code> for tighter local isolation.
+                    </small>
+                </div>
+                <div class="form-group">
+                    <label for="container_expiration">
+                        Container Expiration in Minutes (how long a container will last before it's killed; 0 = never)
+                    </label>
+                    <input class="form-control" type="text" name="container_expiration" id="container_expiration"
+                        placeholder="e.g. 30" value='{{ settings.container_expiration|default("") }}' />
+                </div>
+                <div class="form-group">
+                    <label for="max_containers">
+                        Max Containers Per User/Team
+                    </label>
+                    <input class="form-control" type="number" name="max_containers" id="max_containers"
+                        placeholder="e.g. 3" value='{{ settings.max_containers|default("3") }}' />
+                </div>
+                <div class="form-group">
+                    <label for="container_maxmemory">
+                        Maximum per-container memory usage (in MB)
+                    </label>
+                    <input class="form-control" type="number" name="container_maxmemory" id="container_maxmemory"
+                        placeholder="e.g. 1000" value='{{ settings.container_maxmemory|default("") }}' />
+                </div>
+                <div class="form-group">
+                    <label for="container_maxcpu">
+                        Maximum per-container CPUs (float, e.g 1.5 means 1.5 cores at most)
+                    </label>
+                    <input class="form-control" type="text" name="container_maxcpu" id="container_maxcpu"
+                        placeholder="e.g. 1.5" value='{{ settings.container_maxcpu|default("") }}' />
+                </div>
+                <hr />
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h5 class="mb-0">Advanced</h5>
+                    <button class="btn btn-sm btn-outline-secondary" type="button" data-toggle="collapse"
+                        data-target="#container-advanced-settings" aria-expanded="false"
+                        aria-controls="container-advanced-settings">
+                        Toggle Advanced Options
+                    </button>
+                </div>
+                <div class="collapse" id="container-advanced-settings">
+                    <div class="card card-body bg-light border mb-3">
+                        <div class="form-group">
+                            <label for="allow_challenge_volumes">
+                                Allow Challenge Volume Mounts
+                            </label>
+                            <select class="form-control" name="allow_challenge_volumes" id="allow_challenge_volumes">
+                                <option value="disabled" {% if settings.allow_challenge_volumes|default("disabled") == "disabled" %}selected{% endif %}>disabled</option>
+                                <option value="enabled" {% if settings.allow_challenge_volumes|default("disabled") == "enabled" %}selected{% endif %}>enabled</option>
+                            </select>
+                            <small class="form-text text-muted">
+                                Keep this disabled unless you intentionally trust challenge volume mappings in this local environment.
+                            </small>
+                        </div>
+                        <div class="form-group mb-0">
+                            <label for="allowed_capabilities">
+                                Allowed Linux Capabilities
+                            </label>
+                            <input class="form-control" type="text" name="allowed_capabilities" id="allowed_capabilities"
+                                placeholder="Comma-separated, e.g. SYS_PTRACE,NET_ADMIN"
+                                value='{{ settings.allowed_capabilities|default("") }}' />
+                            <small class="form-text text-muted">
+                                Leave blank to disallow all extra capabilities. Challenge capability requests from the admin panel
+                                or from uploaded <code>challenge.yml</code> files must be a subset of this list.
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="submit-row float-right">
+                    <button type="submit" tabindex="0" class="btn btn-md btn-primary btn-outlined">
+                        Submit
+                    </button>
+                    <input type="hidden" name="nonce" value="{{ Session.nonce }}">
+                </div>
+            </div>
+        </div>
+    </form>
+    {% include "config/container_status.html" %}
+</div>
+{% endblock %}

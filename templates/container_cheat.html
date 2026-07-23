@@ -8,15 +8,19 @@
     <a class="nav-link" href="/containers/admin/settings">&#128279; Settings</a>
 </li>
 <li class="nav-item">
-    <a class="nav-link active" data-toggle="pill" href="#flag">Share flag</a>
+    <a class="nav-link active" data-toggle="pill" href="#flag">Flag reuse review</a>
 </li>
 {% endblock %}
 
 {% block panel %}
 {% include "components/errors.html" %}
 {% if cheat_logs|length == 0 %}
-<p>No cheating events recorded yet.</p>
+<p>No cross-owner random-flag submissions recorded yet.</p>
 {% else %}
+<p class="text-muted">
+    These records are review evidence, not automatic proof of misconduct. The plugin never bans
+    either party automatically and stores only a one-way fingerprint of the submitted flag.
+</p>
 <table class="table table-striped border">
     <thead>
         <tr>
@@ -33,7 +37,7 @@
                 <b>Second Submitter</b>
                 </td>
             <th class="sort-col text-center">
-                <b>Flag</b>
+                <b>Flag fingerprint</b>
                 </td>
         </tr>
     </thead>
@@ -79,7 +83,7 @@
                 {% endif %}
             </td>
             <td>
-                {{ log.reused_flag }}
+                {{ log.flag_fingerprint }}
             </td>
         </tr>
         {% endfor %}

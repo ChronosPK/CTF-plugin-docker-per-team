@@ -1,3 +1,6 @@
+import hashlib
+import re
+
 from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
 from CTFd.models import db
 from .models import ContainerCheatLog, ContainerInfoModel, ContainerSettingsModel
@@ -23,6 +26,11 @@ def normalize_settings_payload(form):
         "container_expiration",
         "container_maxmemory",
         "container_maxcpu",
+        "container_pids_limit",
+        "container_tmpfs_size_mb",
+        "container_log_max_size",
+        "container_log_max_files",
+        "container_start_timeout_seconds",
         "max_containers",
     ]
     advanced_fields = [
@@ -45,6 +53,11 @@ def normalize_settings_payload(form):
         "container_expiration",
         "container_maxmemory",
         "container_maxcpu",
+        "container_pids_limit",
+        "container_tmpfs_size_mb",
+        "container_log_max_size",
+        "container_log_max_files",
+        "container_start_timeout_seconds",
         "max_containers",
     ]
     for field in required_fields:
@@ -54,6 +67,10 @@ def normalize_settings_payload(form):
     integer_fields = (
         "container_expiration",
         "container_maxmemory",
+        "container_pids_limit",
+        "container_tmpfs_size_mb",
+        "container_log_max_files",
+        "container_start_timeout_seconds",
         "max_containers",
         "docker_api_timeout",
     )
@@ -64,8 +81,8 @@ def normalize_settings_payload(form):
             parsed_value = int(payload[field])
         except ValueError:
             raise ValueError(f"{field} must be an integer.")
-        if parsed_value < 0:
-            raise ValueError(f"{field} must be zero or greater.")
+        if parsed_value <= 0:
+            raise ValueError(f"{field} must be greater than zero.")
 
     if payload["docker_api_timeout"] and int(payload["docker_api_timeout"]) < 1:
         raise ValueError("docker_api_timeout must be at least 1 second.")
@@ -78,8 +95,13 @@ def normalize_settings_payload(form):
             parsed_cpu = float(payload["container_maxcpu"])
         except ValueError:
             raise ValueError("container_maxcpu must be a number.")
-        if parsed_cpu < 0:
-            raise ValueError("container_maxcpu must be zero or greater.")
+        if parsed_cpu <= 0:
+            raise ValueError("container_maxcpu must be greater than zero.")
+
+    if not re.fullmatch(r"[1-9][0-9]*[kKmMgG]", payload["container_log_max_size"]):
+        raise ValueError(
+            "container_log_max_size must be a positive size ending in k, m, or g."
+        )
 
     if payload["allow_challenge_volumes"] not in {"disabled", "enabled"}:
         raise ValueError("allow_challenge_volumes must be either disabled or enabled.")
@@ -137,6 +159,17 @@ def route_containers_cheat():
         pass
 
     cheat_logs = ContainerCheatLog.query.order_by(ContainerCheatLog.timestamp.desc()).all()
+    for cheat_log in cheat_logs:
+        stored_value = str(cheat_log.reused_flag or "")
+        if stored_value.startswith("sha256:") and len(stored_value) == 71:
+            cheat_log.flag_fingerprint = stored_value
+        else:
+            # Legacy rows stored the live flag. Never render that secret back
+            # into the admin page; expose only a stable review fingerprint.
+            cheat_log.flag_fingerprint = (
+                "sha256:"
+                + hashlib.sha256(stored_value.encode("utf-8")).hexdigest()
+            )
 
     return render_template(
         "container_cheat.html",
@@ -149,7 +182,8 @@ def route_containers_cheat():
 @admins_only
 def route_update_settings():
     try:
-        payload = normalize_settings_payload(request.form)
+        submitted = request.get_json(silent=True) if request.is_json else request.form
+        payload = normalize_settings_payload(submitted or {})
         ContainerManager.validate_settings(payload)
     except ValueError as err:
         flash(str(err), "error")
@@ -227,6 +261,14 @@ def route_get_images():
         return {"error": str(err)}
 
     return {"images": images}
+
+
+@admin_bp.route("/api/runtime", methods=["GET"])
+@admins_only
+def route_get_runtime_fingerprint():
+    """Expose non-secret runtime identity and enforced policy for target doctors."""
+
+    return jsonify(container_manager.runtime_fingerprint())
 
 @admin_bp.route("/api/running_containers", methods=["GET"])
 @admins_only

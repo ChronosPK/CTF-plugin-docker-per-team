@@ -9,7 +9,7 @@
     <a class="nav-link active" data-toggle="pill" href="#settings">Settings</a>
 </li>
 <li class="nav-item">
-    <a class="nav-link" href="/containers/admin/cheat">&#128279; Share flag</a>
+    <a class="nav-link" href="/containers/admin/cheat">&#128279; Flag reuse review</a>
 </li>
 {% endblock %}
 
@@ -22,8 +22,9 @@
             <div class="tab-pane fade show active" id="docker" role="tabpanel" aria-autocomplete="none">
                 <h5>Local Docker Settings</h5>
                 <p class="form-text text-muted">
-                    This local stack is optimized for direct container exposure on an internal Docker network.
-                    The Base URL should normally stay at <code>unix:///var/run/docker.sock</code> when CTFd runs in Docker on your machine.
+                    Direct-mode challenge ports use a separate event-owned bridge.
+                    The Base URL should normally stay at <code>unix:///var/run/docker.sock</code>
+                    when CTFd runs in Docker on your machine.
                 </p>
 
                 <div class="form-group">
@@ -55,17 +56,15 @@
                         Challenge Docker Network
                     </label>
                     <input class="form-control" type="text" name="challenge_network" id="challenge_network"
-                        placeholder="e.g. csctf_challenge_net"
-                        value='{{ settings.challenge_network|default("csctf_challenge_net") }}' />
+                        value='{{ settings.challenge_network|default("") }}' readonly />
                     <small class="form-text text-muted">
-                        Every challenge container is attached to this existing Docker network.
-                        Keep it separate from the CTFd app network and create it with
-                        <code>com.docker.network.bridge.enable_icc=false</code> for tighter local isolation.
+                        Fixed by <code>CTF_CHALLENGE_NETWORK</code>. The plugin verifies the
+                        event/egress labels, bridge mode, and disabled inter-container communication.
                     </small>
                 </div>
                 <div class="form-group">
                     <label for="container_expiration">
-                        Container Expiration in Minutes (how long a container will last before it's killed; 0 = never)
+                        Container Expiration in Minutes
                     </label>
                     <input class="form-control" type="text" name="container_expiration" id="container_expiration"
                         placeholder="e.g. 30" value='{{ settings.container_expiration|default("") }}' />
@@ -90,6 +89,53 @@
                     </label>
                     <input class="form-control" type="text" name="container_maxcpu" id="container_maxcpu"
                         placeholder="e.g. 1.5" value='{{ settings.container_maxcpu|default("") }}' />
+                </div>
+                <div class="form-group">
+                    <label for="container_pids_limit">
+                        Maximum per-container processes/threads
+                    </label>
+                    <input class="form-control" type="number" min="1"
+                        name="container_pids_limit" id="container_pids_limit"
+                        value='{{ settings.container_pids_limit|default("512") }}' />
+                </div>
+                <div class="form-group">
+                    <label for="container_tmpfs_size_mb">
+                        Writable <code>/tmp</code> size (MB)
+                    </label>
+                    <input class="form-control" type="number" min="1"
+                        name="container_tmpfs_size_mb" id="container_tmpfs_size_mb"
+                        value='{{ settings.container_tmpfs_size_mb|default("256") }}' />
+                    <small class="form-text text-muted">
+                        Root filesystems are always read-only. This bounded tmpfs is the only
+                        plugin-managed writable filesystem.
+                    </small>
+                </div>
+                <div class="form-row">
+                    <div class="form-group col-md-6">
+                        <label for="container_log_max_size">Log file rotation size</label>
+                        <input class="form-control" type="text"
+                            name="container_log_max_size" id="container_log_max_size"
+                            value='{{ settings.container_log_max_size|default("10m") }}' />
+                    </div>
+                    <div class="form-group col-md-6">
+                        <label for="container_log_max_files">Rotated log files</label>
+                        <input class="form-control" type="number" min="1"
+                            name="container_log_max_files" id="container_log_max_files"
+                            value='{{ settings.container_log_max_files|default("3") }}' />
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="container_start_timeout_seconds">
+                        Health/start timeout (seconds)
+                    </label>
+                    <input class="form-control" type="number" min="1"
+                        name="container_start_timeout_seconds"
+                        id="container_start_timeout_seconds"
+                        value='{{ settings.container_start_timeout_seconds|default("60") }}' />
+                    <small class="form-text text-muted">
+                        Images must declare a health check and run as a non-root user.
+                        The endpoint is not returned until the container becomes healthy.
+                    </small>
                 </div>
                 <hr />
                 <div class="d-flex align-items-center justify-content-between mb-3">

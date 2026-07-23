@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import time
@@ -6,7 +7,7 @@ from contextlib import contextmanager
 from flask import has_request_context, jsonify, request
 from sqlalchemy import text
 
-from CTFd.models import Flags, Solves, Teams, Users, db
+from CTFd.models import Flags, Solves, db
 from CTFd.utils import get_config
 from CTFd.utils.user import get_current_user
 
@@ -27,11 +28,30 @@ settings = json.load(open(get_settings_path()))
 USERS_MODE = settings["modes"]["USERS_MODE"]
 TEAMS_MODE = settings["modes"]["TEAMS_MODE"]
 DEFAULT_CONTAINER_SETTINGS = settings.get("defaults", {})
+RUNTIME_SETTING_ENVIRONMENT = {
+    "docker_base_url": "CTF_DOCKER_BASE_URL",
+    "docker_hostname": "CTF_DOCKER_PUBLIC_HOSTNAME",
+    "challenge_network": "CTF_CHALLENGE_NETWORK",
+}
+SECURE_NONZERO_DEFAULTS = {
+    "container_expiration",
+    "container_maxmemory",
+    "container_maxcpu",
+    "container_pids_limit",
+    "container_tmpfs_size_mb",
+    "container_log_max_files",
+    "container_start_timeout_seconds",
+    "max_containers",
+}
 
 
 def settings_to_dict(settings_rows):
     merged_settings = DEFAULT_CONTAINER_SETTINGS.copy()
     merged_settings.update({setting.key: setting.value for setting in settings_rows})
+    for setting_key, environment_key in RUNTIME_SETTING_ENVIRONMENT.items():
+        environment_value = os.environ.get(environment_key, "").strip()
+        if environment_value:
+            merged_settings[setting_key] = environment_value
     return merged_settings
 
 
@@ -40,12 +60,22 @@ def seed_default_settings():
         setting.key: setting for setting in ContainerSettingsModel.query.all()
     }
     missing_defaults = []
+    updated_insecure_defaults = False
 
     for key, value in DEFAULT_CONTAINER_SETTINGS.items():
         if key not in existing_settings:
             missing_defaults.append(ContainerSettingsModel(key=key, value=value))
+        elif (
+            key in SECURE_NONZERO_DEFAULTS
+            and str(existing_settings[key].value or "").strip() in {"", "0", "0.0"}
+        ):
+            # Earlier plugin versions accepted zero as an unlimited/disabled
+            # sentinel for several safety controls. Migrate only those known
+            # sentinels; preserve every explicit non-zero operator value.
+            existing_settings[key].value = value
+            updated_insecure_defaults = True
 
-    if missing_defaults:
+    if missing_defaults or updated_insecure_defaults:
         db.session.add_all(missing_defaults)
         db.session.commit()
 
@@ -129,7 +159,7 @@ def prune_stale_account_containers(container_manager, xid, is_team):
 
 
 @contextmanager
-def lock_container_request(challenge_id, xid, is_team, timeout=5):
+def lock_container_request(xid, is_team, timeout=65):
     engine = db.engine
     dialect_name = getattr(getattr(engine, "dialect", None), "name", "")
     if dialect_name not in {"mysql", "mariadb"}:
@@ -137,7 +167,9 @@ def lock_container_request(challenge_id, xid, is_team, timeout=5):
         return
 
     scope = "team" if is_team else "user"
-    lock_name = f"docker-per-team:{scope}:{xid}:challenge:{challenge_id}"
+    # Capacity is account-wide, so every launch for the same team/user must
+    # share one lock even when requests target different challenges.
+    lock_name = f"docker-per-team:{scope}:{xid}:launch"
     connection = engine.connect()
 
     try:
@@ -216,11 +248,21 @@ def renew_container(container_manager, chal_id, xid, is_team):
 
 
 def create_container(container_manager, chal_id, xid, is_team):
-    challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
-    if challenge is None:
-        return jsonify({"error": "Challenge not found"}), 400
+    lock_timeout = min(
+        max(int(getattr(container_manager, "start_timeout_seconds", 60)) + 5, 5),
+        300,
+    )
+    with lock_container_request(xid, is_team, timeout=lock_timeout):
+        # Authentication and route setup may already have opened a
+        # REPEATABLE READ transaction before this request waited for MySQL's
+        # account lock. End that read-only snapshot so the capacity query sees
+        # containers committed by the previous lock holder.
+        db.session.rollback()
 
-    with lock_container_request(chal_id, xid, is_team):
+        challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
+        if challenge is None:
+            return jsonify({"error": "Challenge not found"}), 400
+
         if solve_exists_for_account(chal_id, xid):
             return jsonify({"error": "Challenge already solved"}), 400
 
@@ -433,18 +475,14 @@ def get_container_flag(submitted_flag, user, container_manager, container_info, 
             and container_flag
             and container_flag.team_id != user.team_id
         ):
-            ban_team_and_original_owner(
-                container_flag, user, container_manager, container_info
-            )
+            log_reused_flag_submission(container_flag, user)
     else:
         if (
             challenge.flag_mode == "random"
             and container_flag
             and container_flag.user_id != user.id
         ):
-            ban_team_and_original_owner(
-                container_flag, user, container_manager, container_info
-            )
+            log_reused_flag_submission(container_flag, user)
 
     if not container_flag:
         raise ValueError("Incorrect")
@@ -452,46 +490,51 @@ def get_container_flag(submitted_flag, user, container_manager, container_info, 
     raise ValueError("Incorrect")
 
 
-def ban_team_and_original_owner(container_flag, user, container_manager, container_info):
-    if not container_flag:
-        raise ValueError("Cannot ban without a valid container flag.")
+def log_reused_flag_submission(container_flag, user):
+    """Record review evidence without leaking a flag or auto-punishing either party."""
 
-    cheat_log = ContainerCheatLog(
-        reused_flag=container_flag.flag,
+    if not container_flag:
+        raise ValueError("Incorrect")
+
+    flag_fingerprint = (
+        "sha256:"
+        + hashlib.sha256(container_flag.flag.encode("utf-8")).hexdigest()
+    )
+    submitter_filters = (
+        {
+            "second_team_id": user.team_id,
+            "second_user_id": None,
+        }
+        if is_team_mode()
+        else {
+            "second_team_id": None,
+            "second_user_id": user.id,
+        }
+    )
+    existing_log = ContainerCheatLog.query.filter_by(
+        reused_flag=flag_fingerprint,
         challenge_id=container_flag.challenge_id,
         original_team_id=container_flag.team_id,
         original_user_id=container_flag.user_id,
-        second_team_id=user.team_id if is_team_mode() else None,
-        second_user_id=user.id if not is_team_mode() else None,
-        timestamp=int(time.time()),
-    )
-    db.session.add(cheat_log)
-    db.session.commit()
+        **submitter_filters,
+    ).first()
 
-    if is_team_mode():
-        original_team = Teams.query.filter_by(id=container_flag.team_id).first()
-        submit_team = Teams.query.filter_by(id=user.team_id).first()
+    if not existing_log:
+        db.session.add(
+            ContainerCheatLog(
+                reused_flag=flag_fingerprint,
+                challenge_id=container_flag.challenge_id,
+                original_team_id=container_flag.team_id,
+                original_user_id=container_flag.user_id,
+                timestamp=int(time.time()),
+                **submitter_filters,
+            )
+        )
+        db.session.commit()
 
-        if original_team:
-            original_team.banned = True
-            for member in original_team.members:
-                member.banned = True
-        if submit_team:
-            submit_team.banned = True
-            for member in submit_team.members:
-                member.banned = True
-    else:
-        if container_flag.user_id:
-            original_user = Users.query.filter_by(id=container_flag.user_id).first()
-            if original_user:
-                original_user.banned = True
-        user.banned = True
-
-    db.session.commit()
-
-    if container_info:
-        container_manager.kill_container(container_info.container_id)
-    raise ValueError("Cheating detected!")
+    # A reused flag is evidence requiring organizer review, not proof of which
+    # participant disclosed it. Never auto-ban either the owner or submitter.
+    raise ValueError("Incorrect")
 
 
 def get_current_user_or_team():

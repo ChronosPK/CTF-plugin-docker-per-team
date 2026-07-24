@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from CTFd.models import db, Flags
+from .healthcheck import ContainerHealthError, wait_until_healthy
 from .helpers import (
     cleanup_container_records,
     parse_capabilities_value,
@@ -437,30 +438,10 @@ class ContainerManager:
         return image_reference
 
     def _wait_until_healthy(self, container) -> None:
-        deadline = time.monotonic() + self.start_timeout_seconds
-        while time.monotonic() < deadline:
-            container.reload()
-            state = container.attrs.get("State", {}) or {}
-            status = str(state.get("Status", "")).lower()
-            if status in {"dead", "exited", "removing"}:
-                raise ContainerException(
-                    f"Challenge container exited during startup (status={status})"
-                )
-
-            health_status = str(
-                (state.get("Health") or {}).get("Status", "")
-            ).lower()
-            if health_status == "healthy":
-                return
-            if health_status == "unhealthy":
-                raise ContainerException(
-                    "Challenge container failed its health check"
-                )
-            time.sleep(0.25)
-
-        raise ContainerException(
-            "Challenge container did not become healthy before the startup timeout"
-        )
+        try:
+            wait_until_healthy(container, self.start_timeout_seconds)
+        except ContainerHealthError as err:
+            raise ContainerException(str(err)) from err
 
     def _generate_unique_random_flag(self, challenge) -> str:
         for _ in range(10):

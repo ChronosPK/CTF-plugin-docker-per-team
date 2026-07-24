@@ -32,6 +32,9 @@ RUNTIME_SETTING_ENVIRONMENT = {
     "docker_base_url": "CTF_DOCKER_BASE_URL",
     "docker_hostname": "CTF_DOCKER_PUBLIC_HOSTNAME",
     "challenge_network": "CTF_CHALLENGE_NETWORK",
+    "container_maxmemory": "CTF_CONTAINER_MEMORY_MB",
+    "container_maxcpu": "CTF_CONTAINER_CPU_LIMIT",
+    "max_containers": "CTF_MAX_CONTAINERS_PER_TEAM",
 }
 SECURE_NONZERO_DEFAULTS = {
     "container_expiration",

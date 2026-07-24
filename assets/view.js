@@ -37,9 +37,17 @@ function mergeQueryParams(parameters, queryParameters) {
     return queryParameters;
 }
 
-function resetAlert() {
+function resetAlert(message) {
     let alert = document.getElementById("deployment-info");
-    alert.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
+    alert.innerHTML = "";
+    alert.setAttribute("aria-live", "polite");
+    let spinner = document.createElement("span");
+    spinner.className = "spinner-border spinner-border-sm text-primary me-2";
+    spinner.setAttribute("role", "status");
+    spinner.setAttribute("aria-hidden", "true");
+    let status = document.createElement("span");
+    status.textContent = message || "Working…";
+    alert.append(spinner, status);
     alert.classList.remove("alert-danger");
 
     // Disable buttons while loading
@@ -90,7 +98,7 @@ function createChallengeLinkElement(data, parent) {
 }
 
 function view_container_info(challenge_id) {
-    let alert = resetAlert();
+    let alert = resetAlert("Checking instance status…");
 
     fetch("/containers/api/view_info", {
         method: "POST",
@@ -125,7 +133,9 @@ function view_container_info(challenge_id) {
 }
 
 function container_request(challenge_id) {
-    let alert = resetAlert();
+    let alert = resetAlert(
+        "Starting your instance and waiting for its health check…"
+    );
 
     fetch("/containers/api/request", {
         method: "POST",
@@ -162,7 +172,7 @@ function container_request(challenge_id) {
 }
 
 function container_renew(challenge_id) {
-    let alert = resetAlert();
+    let alert = resetAlert("Extending the instance lifetime…");
 
     fetch("/containers/api/renew", {
         method: "POST",
@@ -195,7 +205,7 @@ function container_renew(challenge_id) {
 }
 
 function container_stop(challenge_id) {
-    let alert = resetAlert();
+    let alert = resetAlert("Stopping the instance…");
 
     fetch("/containers/api/stop", {
         method: "POST",

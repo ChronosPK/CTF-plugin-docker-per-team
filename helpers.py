@@ -37,6 +37,8 @@ RUNTIME_SETTING_ENVIRONMENT = {
     "challenge_network": "CTF_CHALLENGE_NETWORK",
     "container_maxmemory": "CTF_CONTAINER_MEMORY_MB",
     "container_maxcpu": "CTF_CONTAINER_CPU_LIMIT",
+    "container_pids_limit": "CTF_CONTAINER_PIDS_LIMIT",
+    "container_tmpfs_size_mb": "CTF_CONTAINER_TMPFS_SIZE_MB",
     "max_containers": "CTF_MAX_CONTAINERS_PER_TEAM",
 }
 SECURE_NONZERO_DEFAULTS = {
@@ -354,14 +356,15 @@ def create_container(container_manager, chal_id, xid, is_team):
     return jsonify(
         {
             "status": "created",
-                **build_connection_payload(
-                    container_manager,
-                    challenge,
-                    created_container["port"],
-                    created_container["expires"],
-                ),
-            }
-        )
+            "resources": created_container["resources"],
+            **build_connection_payload(
+                container_manager,
+                challenge,
+                created_container["port"],
+                created_container["expires"],
+            ),
+        }
+    )
 
 
 def view_container_info(container_manager, chal_id, xid, is_team):

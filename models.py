@@ -15,6 +15,10 @@ class ContainerChallengeModel(Challenges):
     volumes = db.Column(db.Text, default="")
     capabilities = db.Column(db.Text, default="")
     connection_type = db.Column(db.Text)
+    memory_limit_mb = db.Column(db.Integer, nullable=True)
+    cpu_limit = db.Column(db.Float, nullable=True)
+    pids_limit = db.Column(db.Integer, nullable=True)
+    tmpfs_size_mb = db.Column(db.Integer, nullable=True)
 
     # Dynamic challenge properties
     initial = db.Column(db.Integer, default=0)

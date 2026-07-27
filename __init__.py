@@ -24,6 +24,7 @@ from .models import (
     ContainerChallengeModel,
     ContainerSettingsModel,
 )
+from .runtime_policy import RuntimePolicyError, resolve_resource_limits
 from .user_routes import containers_bp, set_container_manager as set_user_manager
 
 settings = json.load(open(get_settings_path()))
@@ -46,8 +47,27 @@ def _normalize_challenge_payload(data, *, creation):
         value = raw_value.strip() if isinstance(raw_value, str) else raw_value
 
         try:
-            if attr in {"initial", "minimum", "decay", "port", "random_flag_length"}:
+            if attr in {
+                "memory_limit_mb",
+                "pids_limit",
+                "tmpfs_size_mb",
+            } and value in {None, ""}:
+                value = None
+            elif attr == "cpu_limit" and value in {None, ""}:
+                value = None
+            elif attr in {
+                "initial",
+                "minimum",
+                "decay",
+                "port",
+                "random_flag_length",
+                "memory_limit_mb",
+                "pids_limit",
+                "tmpfs_size_mb",
+            }:
                 value = int(value)
+            elif attr == "cpu_limit":
+                value = float(value)
             elif attr in {"connection_type", "flag_mode"}:
                 value = str(value).strip().lower()
             elif attr in {"volumes", "capabilities"}:
@@ -116,6 +136,10 @@ def _normalize_challenge_payload(data, *, creation):
                 raise exc("Capabilities JSON must be an array of strings")
 
     effective_settings = settings_to_dict(ContainerSettingsModel.query.all())
+    try:
+        resolve_resource_limits(effective_settings, normalized)
+    except RuntimePolicyError as err:
+        raise exc(str(err))
 
     volumes_enabled = effective_settings.get("allow_challenge_volumes", "disabled") == "enabled"
     if normalized.get("volumes") and not volumes_enabled:
@@ -166,6 +190,10 @@ class ContainerChallenge(BaseChallenge):
             "volumes": challenge.volumes,
             "capabilities": challenge.capabilities,
             "connection_type": challenge.connection_type,
+            "memory_limit_mb": challenge.memory_limit_mb,
+            "cpu_limit": challenge.cpu_limit,
+            "pids_limit": challenge.pids_limit,
+            "tmpfs_size_mb": challenge.tmpfs_size_mb,
             "initial": challenge.initial,
             "decay": challenge.decay,
             "minimum": challenge.minimum,

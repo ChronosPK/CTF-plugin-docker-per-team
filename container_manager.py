@@ -28,6 +28,8 @@ from .runtime_policy import (
     build_hardening_profile,
     get_start_timeout_seconds,
     public_runtime_fingerprint,
+    resolve_resource_limits,
+    validate_applied_resource_limits,
     validate_challenge_network_attributes,
     validate_daemon_capabilities,
     validate_docker_endpoint,
@@ -443,6 +445,23 @@ class ContainerManager:
         except ContainerHealthError as err:
             raise ContainerException(str(err)) from err
 
+    def _verify_applied_resource_limits(
+        self,
+        container,
+        expected: dict[str, int | float],
+    ) -> dict[str, int | float]:
+        """Fail closed if Docker did not apply the selected resource policy."""
+
+        container.reload()
+        try:
+            return validate_applied_resource_limits(
+                container.attrs,
+                expected,
+                allow_missing_memory=self.allow_limited_local_daemon,
+            )
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
+
     def _generate_unique_random_flag(self, challenge) -> str:
         for _ in range(10):
             flag = generate_random_flag(challenge)
@@ -552,7 +571,23 @@ class ContainerManager:
         # Recheck the daemon and event network immediately before every launch.
         # A network can be deleted/recreated while CTFd remains up.
         self._validate_live_runtime_boundary()
-        kwargs = dict(self.hardening_profile)
+        resource_overrides = {
+            "memory_limit_mb": challenge.memory_limit_mb,
+            "cpu_limit": challenge.cpu_limit,
+            "pids_limit": challenge.pids_limit,
+            "tmpfs_size_mb": challenge.tmpfs_size_mb,
+        }
+        try:
+            resource_limits = resolve_resource_limits(
+                self.settings,
+                resource_overrides,
+            )
+            kwargs = build_hardening_profile(
+                self.settings,
+                resource_overrides,
+            )
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
         log_config = kwargs.pop("log_config")
         kwargs["log_config"] = docker.types.LogConfig(
             type=log_config["type"],
@@ -631,6 +666,14 @@ class ContainerManager:
             "ctfd.challenge_id": str(challenge.id),
             "ctfd.scope": "team" if is_team else "user",
             "ctfd.scope_id": str(xid),
+            "ctfd.resource.memory_mb": str(
+                resource_limits["memory_limit_mb"]
+            ),
+            "ctfd.resource.cpu": f"{resource_limits['cpu_limit']:g}",
+            "ctfd.resource.pids": str(resource_limits["pids_limit"]),
+            "ctfd.resource.tmpfs_mb": str(
+                resource_limits["tmpfs_size_mb"]
+            ),
             **self.identity.labels(),
         }
 
@@ -652,6 +695,10 @@ class ContainerManager:
                 **kwargs,
             )
 
+            applied_resources = self._verify_applied_resource_limits(
+                container,
+                resource_limits,
+            )
             self._wait_until_healthy(container)
             port = self.get_container_port(container.id)
             if port is None:
@@ -686,6 +733,7 @@ class ContainerManager:
                 "container": container,
                 "expires": expires,
                 "port": port,
+                "resources": applied_resources,
             }
         except IntegrityError:
             db.session.rollback()

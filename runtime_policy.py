@@ -59,6 +59,37 @@ class RuntimePolicyError(ValueError):
     """Raised when runtime identity or hardening configuration is unsafe."""
 
 
+def validate_player_challenge_access(
+    *,
+    state: str,
+    challenges_are_visible: bool,
+    admin: bool,
+    requirements: Mapping[str, object] | None = None,
+    existing_challenge_ids: set[int] | None = None,
+    solved_challenge_ids: set[int] | None = None,
+) -> None:
+    """Enforce the same hidden/locked/prerequisite boundary as CTFd's API."""
+
+    if admin:
+        return
+    if not challenges_are_visible or state in {"hidden", "locked"}:
+        raise RuntimePolicyError("Challenge is not available.")
+
+    requirements = requirements or {}
+    raw_prerequisites = requirements.get("prerequisites", [])
+    if not isinstance(raw_prerequisites, (list, tuple, set)):
+        raise RuntimePolicyError("Challenge is not available.")
+    try:
+        prerequisites = {int(value) for value in raw_prerequisites}
+    except (TypeError, ValueError) as error:
+        raise RuntimePolicyError("Challenge is not available.") from error
+
+    if existing_challenge_ids is not None:
+        prerequisites.intersection_update(existing_challenge_ids)
+    if not prerequisites.issubset(solved_challenge_ids or set()):
+        raise RuntimePolicyError("Challenge is not available.")
+
+
 def _required_value(environment: Mapping[str, str], name: str) -> str:
     value = str(environment.get(name, "") or "").strip()
     if not value:

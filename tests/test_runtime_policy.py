@@ -128,7 +128,51 @@ class RuntimeIdentityTests(unittest.TestCase):
                 ):
                     runtime_policy.RuntimeIdentity.from_environment(
                         runtime_environment(CTF_CHALLENGE_BIND_IP=value)
+        )
+
+
+class PlayerChallengeAccessTests(unittest.TestCase):
+    def test_players_cannot_access_hidden_or_locked_challenges(self):
+        for state in ("hidden", "locked"):
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(
+                    runtime_policy.RuntimePolicyError,
+                    "not available",
+                ):
+                    runtime_policy.validate_player_challenge_access(
+                        state=state,
+                        challenges_are_visible=True,
+                        admin=False,
                     )
+
+    def test_players_must_satisfy_valid_prerequisites(self):
+        with self.assertRaises(runtime_policy.RuntimePolicyError):
+            runtime_policy.validate_player_challenge_access(
+                state="visible",
+                challenges_are_visible=True,
+                admin=False,
+                requirements={"prerequisites": [3, 7, 999]},
+                existing_challenge_ids={3, 7},
+                solved_challenge_ids={3},
+            )
+        runtime_policy.validate_player_challenge_access(
+            state="visible",
+            challenges_are_visible=True,
+            admin=False,
+            requirements={"prerequisites": [3, 7, 999]},
+            existing_challenge_ids={3, 7},
+            solved_challenge_ids={3, 7},
+        )
+
+    def test_admins_can_manage_hidden_challenges(self):
+        runtime_policy.validate_player_challenge_access(
+            state="hidden",
+            challenges_are_visible=False,
+            admin=True,
+            requirements={"prerequisites": [3]},
+            existing_challenge_ids={3},
+            solved_challenge_ids=set(),
+        )
 
 
 class ImageReferenceTests(unittest.TestCase):

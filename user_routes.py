@@ -100,6 +100,8 @@ def account_ratelimit(method="POST", limit=50, interval=300):
 def get_connect_type(challenge_id):
     try:
         return connect_type(challenge_id)
+    except ValueError as err:
+        return {"error": str(err)}, 403
     except ContainerException as err:
         return {"error": str(err)}, 500
 

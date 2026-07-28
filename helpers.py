@@ -7,9 +7,11 @@ from contextlib import contextmanager
 from flask import has_request_context, jsonify, request
 from sqlalchemy import text
 
-from CTFd.models import Flags, Solves, db
+from CTFd.models import Challenges, Flags, Solves, db
 from CTFd.utils import get_config
-from CTFd.utils.user import get_current_user
+from CTFd.utils.challenges import get_solve_ids_for_user_id
+from CTFd.utils.config.visibility import challenges_visible
+from CTFd.utils.user import get_current_user, is_admin
 
 from .models import (
     ContainerChallengeModel,
@@ -18,6 +20,7 @@ from .models import (
     ContainerInfoModel,
     ContainerSettingsModel,
 )
+from .runtime_policy import RuntimePolicyError, validate_player_challenge_access
 
 
 def get_settings_path():
@@ -32,6 +35,11 @@ RUNTIME_SETTING_ENVIRONMENT = {
     "docker_base_url": "CTF_DOCKER_BASE_URL",
     "docker_hostname": "CTF_DOCKER_PUBLIC_HOSTNAME",
     "challenge_network": "CTF_CHALLENGE_NETWORK",
+    "container_maxmemory": "CTF_CONTAINER_MEMORY_MB",
+    "container_maxcpu": "CTF_CONTAINER_CPU_LIMIT",
+    "container_pids_limit": "CTF_CONTAINER_PIDS_LIMIT",
+    "container_tmpfs_size_mb": "CTF_CONTAINER_TMPFS_SIZE_MB",
+    "max_containers": "CTF_MAX_CONTAINERS_PER_TEAM",
 }
 SECURE_NONZERO_DEFAULTS = {
     "container_expiration",
@@ -111,6 +119,34 @@ def build_connection_payload(container_manager, challenge, port, expires):
 def solve_exists_for_account(challenge_id, xid):
     field = Solves.team_id if is_team_mode() else Solves.user_id
     return Solves.query.filter(Solves.challenge_id == challenge_id, field == xid).first()
+
+
+def enforce_player_challenge_access(challenge):
+    user = get_current_user()
+    requirements = challenge.requirements or {}
+    existing_ids = None
+    solved_ids = None
+    if requirements:
+        existing_ids = {
+            challenge_id
+            for challenge_id, in Challenges.query.with_entities(Challenges.id).all()
+        }
+        solved_ids = (
+            get_solve_ids_for_user_id(user.id)
+            if user is not None
+            else set()
+        )
+    try:
+        validate_player_challenge_access(
+            state=str(challenge.state or ""),
+            challenges_are_visible=bool(challenges_visible()),
+            admin=bool(is_admin()),
+            requirements=requirements,
+            existing_challenge_ids=existing_ids,
+            solved_challenge_ids=solved_ids,
+        )
+    except RuntimePolicyError as error:
+        raise ValueError("Challenge is not available.") from error
 
 
 def cleanup_container_records(container_info, commit=True):
@@ -208,6 +244,7 @@ def renew_container(container_manager, chal_id, xid, is_team):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
     if challenge is None:
         return jsonify({"error": "Challenge not found"}), 400
+    enforce_player_challenge_access(challenge)
 
     running_container = ContainerInfoModel.query.filter_by(
         challenge_id=challenge.id,
@@ -262,6 +299,7 @@ def create_container(container_manager, chal_id, xid, is_team):
         challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
         if challenge is None:
             return jsonify({"error": "Challenge not found"}), 400
+        enforce_player_challenge_access(challenge)
 
         if solve_exists_for_account(chal_id, xid):
             return jsonify({"error": "Challenge already solved"}), 400
@@ -318,20 +356,22 @@ def create_container(container_manager, chal_id, xid, is_team):
     return jsonify(
         {
             "status": "created",
-                **build_connection_payload(
-                    container_manager,
-                    challenge,
-                    created_container["port"],
-                    created_container["expires"],
-                ),
-            }
-        )
+            "resources": created_container["resources"],
+            **build_connection_payload(
+                container_manager,
+                challenge,
+                created_container["port"],
+                created_container["expires"],
+            ),
+        }
+    )
 
 
 def view_container_info(container_manager, chal_id, xid, is_team):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
     if challenge is None:
         return jsonify({"error": "Challenge not found"}), 400
+    enforce_player_challenge_access(challenge)
 
     running_container = ContainerInfoModel.query.filter_by(
         challenge_id=challenge.id,
@@ -365,6 +405,7 @@ def connect_type(chal_id):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
     if challenge is None:
         return jsonify({"error": "Challenge not found"}), 400
+    enforce_player_challenge_access(challenge)
     return jsonify({"status": "Ok", "connect": challenge.connection_type})
 
 

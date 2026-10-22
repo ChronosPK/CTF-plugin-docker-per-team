@@ -462,10 +462,38 @@ def get_expected_static_flag(challenge):
     return f"{challenge.flag_prefix}{flag_content}{challenge.flag_suffix}"
 
 
+def flag_case_insensitive(challenge):
+    """True only when the author explicitly asked for a case-insensitive flag.
+
+    Reuses CTFd's own per-flag convention: the Flags row's `data` column holds
+    "case_insensitive" or "case_sensitive", set from the normal CTFd admin UI.
+    Anything else, including an empty value, means case sensitive.
+    """
+    flag_obj = Flags.query.filter_by(challenge_id=challenge.id).first()
+    if not flag_obj:
+        return False
+    return str(getattr(flag_obj, "data", "") or "").strip().lower() == "case_insensitive"
+
+
+def flags_match(challenge, submitted, stored):
+    """Compare a submitted flag against a stored one, honouring the challenge setting.
+
+    This has to exist because MariaDB's default collation is case INSENSITIVE, so a
+    `filter_by(flag=submitted)` lookup matches rows that differ only in case. Every
+    such lookup is re-checked here, otherwise the database silently overrides the
+    per-challenge setting and every container flag behaves case-insensitively.
+    """
+    if submitted is None or stored is None:
+        return False
+    if flag_case_insensitive(challenge):
+        return str(submitted).casefold() == str(stored).casefold()
+    return str(submitted) == str(stored)
+
+
 def get_container_flag(submitted_flag, user, container_manager, container_info, challenge):
     owner_filters = get_submission_owner_filters(user)
 
-    if container_info and submitted_flag == container_info.flag:
+    if container_info and flags_match(challenge, submitted_flag, container_info.flag):
         container_flag = ContainerFlagModel.query.filter_by(
             challenge_id=challenge.id,
             container_id=container_info.container_id,
@@ -486,10 +514,14 @@ def get_container_flag(submitted_flag, user, container_manager, container_info, 
         flag=submitted_flag,
         **owner_filters,
     ).first()
+    if owned_flag and not flags_match(challenge, submitted_flag, owned_flag.flag):
+        owned_flag = None
     if owned_flag:
         return owned_flag
 
-    if challenge.flag_mode == "static" and submitted_flag == get_expected_static_flag(challenge):
+    if challenge.flag_mode == "static" and flags_match(
+        challenge, submitted_flag, get_expected_static_flag(challenge)
+    ):
         container_flag = ContainerFlagModel.query.filter_by(
             challenge_id=challenge.id,
             flag=submitted_flag,
@@ -509,6 +541,8 @@ def get_container_flag(submitted_flag, user, container_manager, container_info, 
         challenge_id=challenge.id,
         flag=submitted_flag,
     ).first()
+    if container_flag and not flags_match(challenge, submitted_flag, container_flag.flag):
+        container_flag = None
 
     if is_team_mode():
         if (

@@ -259,7 +259,9 @@ class ContainerRandomFlagFormatModel(db.Model):
         ),
         CheckConstraint(
             "OCTET_LENGTH(prefix) BETWEEN 1 AND 512 "
-            "AND OCTET_LENGTH(suffix) BETWEEN 1 AND 512",
+            "AND OCTET_LENGTH(suffix) BETWEEN 1 AND 512 "
+            "AND prefix REGEXP '^[[:ascii:]]+$' "
+            "AND suffix REGEXP '^[[:ascii:]]+$'",
             name="ck_crff_prefix_suffix",
         ),
         CheckConstraint(

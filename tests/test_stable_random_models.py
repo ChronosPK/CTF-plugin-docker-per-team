@@ -84,6 +84,12 @@ class StableRandomSchemaMetadataTests(unittest.TestCase):
         self.assertTrue(format_table.c.format_sha256.type.__class__ is mysql.BINARY)
         self.assertIn("uq_crff_challenge", constraint_names(format_table))
         self.assertIn("uq_crff_snapshot", constraint_names(format_table))
+        ascii_constraint = next(
+            constraint
+            for constraint in format_table.constraints
+            if constraint.name == "ck_crff_prefix_suffix"
+        )
+        self.assertIn("REGEXP '^[[:ascii:]]+$'", ascii_constraint.sqltext.text)
         challenge_fk = next(iter(format_table.foreign_key_constraints))
         self.assertEqual("RESTRICT", challenge_fk.ondelete)
         self.assertEqual(

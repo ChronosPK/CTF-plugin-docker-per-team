@@ -353,9 +353,10 @@ def validate_challenge_network_attributes(
         )
 
 
-# The only capabilities a root entrypoint needs to prepare its tmpfs and drop each process to its own
-# user. A listed challenge may run a root image only when it adds nothing beyond these.
-ROOT_EXCEPTION_CAPABILITIES = frozenset({"CHOWN", "SETUID", "SETGID"})
+# The only capabilities a root entrypoint needs to prepare its tmpfs, drop each process to its own
+# user, and stop its own children when one dies (KILL is limited to the container's PID namespace).
+# A listed challenge may run a root image only when it adds nothing beyond these.
+ROOT_EXCEPTION_CAPABILITIES = frozenset({"CHOWN", "SETUID", "SETGID", "KILL"})
 
 
 def root_image_exception_allowed(

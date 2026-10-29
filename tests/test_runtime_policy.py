@@ -755,7 +755,7 @@ class RootImageExceptionTests(unittest.TestCase):
     allowed = staticmethod(runtime_policy.root_image_exception_allowed)
 
     def test_listed_challenge_with_drop_privilege_capabilities_is_allowed(self):
-        for caps in ([], ["CHOWN"], ["chown", "setuid", "setgid"], ["SETUID", "SETGID"]):
+        for caps in ([], ["CHOWN"], ["chown", "setuid", "setgid"], ["SETUID", "SETGID"], ["CHOWN", "SETUID", "SETGID", "KILL"]):
             with self.subTest(caps=caps):
                 self.assertTrue(self.allowed("Apogee", caps, "Apogee, Other"))
 
@@ -767,7 +767,7 @@ class RootImageExceptionTests(unittest.TestCase):
     def test_any_capability_beyond_the_three_is_refused(self):
         for extra in ("SYS_ADMIN", "DAC_OVERRIDE", "NET_RAW", "SYS_PTRACE", "FOWNER"):
             with self.subTest(extra=extra):
-                self.assertFalse(self.allowed("Apogee", ["CHOWN", "SETUID", "SETGID", extra], "Apogee"))
+                self.assertFalse(self.allowed("Apogee", ["CHOWN", "SETUID", "SETGID", "KILL", extra], "Apogee"))
 
 
 if __name__ == "__main__":

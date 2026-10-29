@@ -181,7 +181,7 @@
                                 value='{{ settings.root_image_challenges|default("") }}' />
                             <small class="form-text text-muted">
                                 Leave blank to require a non-root USER for every image. A listed challenge may use a root image only
-                                if its extra capabilities are a subset of CHOWN, SETUID, SETGID; every other hardening rule still applies.
+                                if its extra capabilities are a subset of CHOWN, SETUID, SETGID, KILL; every other hardening rule still applies.
                             </small>
                         </div>
                     </div>

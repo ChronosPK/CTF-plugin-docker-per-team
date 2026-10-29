@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 IDENTITY_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 NETWORK_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 IMAGE_DIGEST_PATTERN = re.compile(r"@sha256:[0-9a-f]{64}$")
+PINNED_REFERENCE_PATTERN = re.compile(r"^(?P<name>[^@]+)@(?P<digest>sha256:[0-9a-f]{64})$")
 LOG_SIZE_PATTERN = re.compile(r"^[1-9][0-9]*[kmg]$")
 
 REQUIRED_ENVIRONMENT = (
@@ -389,6 +390,30 @@ def validate_image_reference(image: str, identity: RuntimeIdentity) -> str:
             "Production container images must be referenced by @sha256 digest"
         )
     return value
+
+
+def resolve_pinned_image(reference: str, get_image, not_found=LookupError):
+    """Return ``(image, run_reference)`` for an already validated image reference.
+
+    A registry digest (``repo@sha256:<manifest digest>``) resolves directly. Images loaded
+    with ``docker load`` on the classic image store carry no registry digest, so
+    ``repo:tag@sha256:<image id>`` is accepted as well: the tag must currently point at
+    exactly that image ID, and the container then runs from the immutable ID rather than
+    the mutable tag.
+    """
+
+    try:
+        return get_image(reference), reference
+    except not_found:
+        match = PINNED_REFERENCE_PATTERN.match(reference)
+        if match is None or ":" not in match["name"].rsplit("/", 1)[-1]:
+            raise
+    image = get_image(match["name"])
+    if getattr(image, "id", None) != match["digest"]:
+        raise RuntimePolicyError(
+            "Container image tag does not match its pinned @sha256 image ID"
+        )
+    return image, match["digest"]
 
 
 def validate_docker_endpoint(value: str, identity: RuntimeIdentity) -> str:

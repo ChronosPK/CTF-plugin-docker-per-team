@@ -232,6 +232,65 @@ class ImageReferenceTests(unittest.TestCase):
         )
 
 
+class PinnedImageResolutionTests(unittest.TestCase):
+    IMAGE_ID = "sha256:" + "b" * 64
+
+    class Image:
+        def __init__(self, image_id):
+            self.id = image_id
+
+    def store(self, images):
+        def get_image(reference):
+            if reference not in images:
+                raise LookupError(reference)
+            return images[reference]
+
+        return get_image
+
+    def test_registry_digest_resolves_directly(self):
+        ref = "csctf26/web-apogee@sha256:" + "c" * 64
+        image = self.Image(self.IMAGE_ID)
+        self.assertEqual(
+            runtime_policy.resolve_pinned_image(ref, self.store({ref: image})),
+            (image, ref),
+        )
+
+    def test_loaded_image_runs_from_its_pinned_id(self):
+        image = self.Image(self.IMAGE_ID)
+        get_image = self.store({"csctf26/web-apogee:1": image})
+        self.assertEqual(
+            runtime_policy.resolve_pinned_image(
+                f"csctf26/web-apogee:1@{self.IMAGE_ID}", get_image
+            ),
+            (image, self.IMAGE_ID),
+        )
+
+    def test_retagged_image_is_refused(self):
+        get_image = self.store({"csctf26/web-apogee:1": self.Image("sha256:" + "d" * 64)})
+        with self.assertRaisesRegex(runtime_policy.RuntimePolicyError, "pinned"):
+            runtime_policy.resolve_pinned_image(
+                f"csctf26/web-apogee:1@{self.IMAGE_ID}", get_image
+            )
+
+    def test_untagged_digest_is_not_guessed(self):
+        get_image = self.store({})
+        with self.assertRaises(LookupError):
+            runtime_policy.resolve_pinned_image(
+                f"csctf26/web-apogee@{self.IMAGE_ID}", get_image
+            )
+
+    def test_pinned_tag_passes_production_validation(self):
+        identity = runtime_policy.RuntimeIdentity.from_environment(
+            runtime_environment(
+                CTF_TARGET_ID="production",
+                CTF_RELEASE_ID="cybersea26-r1",
+                CTF_EGRESS_POLICY="worker-firewall-default-deny",
+            )
+        )
+        ref = f"cybersea/rogue-update:cybersea26-r1@{self.IMAGE_ID}"
+        self.assertEqual(runtime_policy.validate_image_reference(ref, identity), ref)
+
+
 class DockerEndpointTests(unittest.TestCase):
     def test_local_accepts_the_managed_socket(self):
         identity = runtime_policy.RuntimeIdentity.from_environment(

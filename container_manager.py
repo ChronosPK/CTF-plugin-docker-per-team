@@ -28,6 +28,7 @@ from .runtime_policy import (
     build_hardening_profile,
     get_start_timeout_seconds,
     public_runtime_fingerprint,
+    resolve_pinned_image,
     resolve_resource_limits,
     root_image_exception_allowed,
     validate_applied_resource_limits,
@@ -413,9 +414,13 @@ class ContainerManager:
             raise ContainerException(str(err))
 
         try:
-            image = self.client.images.get(image_reference)
-        except docker.errors.ImageNotFound:
+            image, image_reference = resolve_pinned_image(
+                image_reference, self.client.images.get, docker.errors.NotFound
+            )
+        except docker.errors.NotFound:
             raise ContainerException("Docker image not found")
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
 
         config = image.attrs.get("Config", {}) or {}
         configured_user = str(config.get("User", "") or "").strip().lower()
@@ -795,8 +800,12 @@ class ContainerManager:
 
         images_list = set()
         for image in images:
-            references = list(image.tags or []) + list(
-                image.attrs.get("RepoDigests", []) or []
+            # Tags pinned to their image ID are offered too, so locally loaded images
+            # (which have no RepoDigests) still have a reference production accepts.
+            references = (
+                list(image.tags or [])
+                + [f"{tag}@{image.id}" for tag in image.tags or []]
+                + list(image.attrs.get("RepoDigests", []) or [])
             )
             for reference in references:
                 try:

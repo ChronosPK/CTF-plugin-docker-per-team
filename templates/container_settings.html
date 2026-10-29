@@ -172,6 +172,18 @@
                                 or from uploaded <code>challenge.yml</code> files must be a subset of this list.
                             </small>
                         </div>
+                        <div class="form-group">
+                            <label for="root_image_challenges">
+                                Challenges Allowed a Root Image
+                            </label>
+                            <input class="form-control" type="text" name="root_image_challenges" id="root_image_challenges"
+                                placeholder="Comma-separated challenge names, e.g. Apogee"
+                                value='{{ settings.root_image_challenges|default("") }}' />
+                            <small class="form-text text-muted">
+                                Leave blank to require a non-root USER for every image. A listed challenge may use a root image only
+                                if its extra capabilities are a subset of CHOWN, SETUID, SETGID; every other hardening rule still applies.
+                            </small>
+                        </div>
                     </div>
                 </div>
 

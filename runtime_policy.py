@@ -353,6 +353,24 @@ def validate_challenge_network_attributes(
         )
 
 
+# The only capabilities a root entrypoint needs to prepare its tmpfs and drop each process to its own
+# user. A listed challenge may run a root image only when it adds nothing beyond these.
+ROOT_EXCEPTION_CAPABILITIES = frozenset({"CHOWN", "SETUID", "SETGID"})
+
+
+def root_image_exception_allowed(
+    challenge_name: str,
+    requested_capabilities,
+    root_image_challenges: str,
+) -> bool:
+    """Whether a challenge may use a root image: it must be named in the comma-separated
+    `root_image_challenges` setting and request only ROOT_EXCEPTION_CAPABILITIES. All other
+    hardening (cap_drop ALL, no-new-privileges, read-only root, limits) still applies."""
+    listed = {name.strip() for name in (root_image_challenges or "").split(",") if name.strip()}
+    requested = {str(capability).strip().upper() for capability in requested_capabilities or ()}
+    return bool(challenge_name) and challenge_name in listed and requested <= ROOT_EXCEPTION_CAPABILITIES
+
+
 def validate_image_reference(image: str, identity: RuntimeIdentity) -> str:
     """Reject malformed images and require a digest on production targets."""
 

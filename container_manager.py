@@ -29,6 +29,7 @@ from .runtime_policy import (
     get_start_timeout_seconds,
     public_runtime_fingerprint,
     resolve_resource_limits,
+    root_image_exception_allowed,
     validate_applied_resource_limits,
     validate_challenge_network_attributes,
     validate_daemon_capabilities,
@@ -420,9 +421,18 @@ class ContainerManager:
         configured_user = str(config.get("User", "") or "").strip().lower()
         user_name = configured_user.split(":", 1)[0]
         if not user_name or user_name in {"0", "root"}:
-            raise ContainerException(
-                "Challenge image must declare a non-root USER"
-            )
+            try:
+                requested = parse_capabilities_value(getattr(challenge, "capabilities", "") or "")
+            except ValueError as err:
+                raise ContainerException(str(err))
+            if not root_image_exception_allowed(
+                getattr(challenge, "name", ""),
+                requested,
+                self.settings.get("root_image_challenges", ""),
+            ):
+                raise ContainerException(
+                    "Challenge image must declare a non-root USER"
+                )
 
         healthcheck = config.get("Healthcheck") or {}
         health_test = healthcheck.get("Test") or []

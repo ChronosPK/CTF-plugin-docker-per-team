@@ -219,12 +219,11 @@ class ContainerManager:
         except RuntimePolicyError as err:
             raise ContainerException(str(err))
 
-        # Connect to the docker daemon
-        try:
-            self.initialize_connection(self.settings, app)
-        except ContainerException as err:
-            self.connection_error = str(err)
-            print(f"Docker container service is unavailable: {err}")
+        # CTFd must remain available when the independent challenge host is
+        # offline. The existing run_command wrapper establishes and validates
+        # the authenticated Docker connection only when a container action is
+        # requested.
+        self.connection_error = "Connection deferred until a container action is requested."
 
     def initialize_connection(self, settings, app) -> None:
         self.settings = dict(settings)

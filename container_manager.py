@@ -410,7 +410,7 @@ class ContainerManager:
                 "Challenge network must be separate from the CTFd application network"
             )
 
-    def _get_owned_container(self, container_id: str):
+    def _get_owned_container(self, container_id: str, *, worker_id: str | None = None):
         try:
             container = self.client.containers.get(container_id)
         except docker.errors.NotFound:
@@ -420,6 +420,20 @@ class ContainerManager:
             raise ContainerException(
                 "Refusing to operate on a container owned by another or an "
                 "unlabelled event"
+            )
+        # Legacy instances predate the ownership label.  They are tolerated
+        # only on the retained single primary worker; a multi-worker launch
+        # must never infer ownership from an absent label.
+        observed_worker_id = labels.get("ctfd.worker_id")
+        if (
+            worker_id == "primary"
+            and observed_worker_id is None
+            and len(self.worker_pool) == 1
+        ):
+            return container
+        if worker_id and observed_worker_id != worker_id:
+            raise ContainerException(
+                "Refusing to operate on a container bound to another Docker worker"
             )
         return container
 
@@ -581,7 +595,15 @@ class ContainerManager:
 
     @run_command
     def is_container_running(self, container_id: str) -> bool:
-        container = self._get_owned_container(container_id)
+        container_info = ContainerInfoModel.query.filter_by(
+            container_id=container_id
+        ).first()
+        if container_info is None:
+            return False
+        container = self._get_owned_container(
+            container_id,
+            worker_id=container_info.worker_id,
+        )
         if container is None:
             return False
         return container.status == "running"
@@ -805,7 +827,15 @@ class ContainerManager:
     @run_command
     def get_container_port(self, container_id: str) -> "str|None":
         try:
-            container = self._get_owned_container(container_id)
+            container_info = ContainerInfoModel.query.filter_by(
+                container_id=container_id
+            ).first()
+            if container_info is None:
+                return None
+            container = self._get_owned_container(
+                container_id,
+                worker_id=container_info.worker_id,
+            )
             if container is None:
                 return None
             for port in list(container.ports.values()):
@@ -846,7 +876,10 @@ class ContainerManager:
         ).first()
 
         try:
-            container = self._get_owned_container(container_id)
+            container = self._get_owned_container(
+                container_id,
+                worker_id=container_info.worker_id if container_info else None,
+            )
             if container is not None:
                 container.kill()
         except docker.errors.APIError as err:

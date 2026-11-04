@@ -33,6 +33,12 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
         self.assertIn("if active == minimum_load", SOURCE)
         self.assertIn("no healthy Docker worker has launch capacity", (ROOT / "placement.py").read_text(encoding="utf-8"))
 
+    def test_concurrent_first_launch_adopts_the_unique_constraint_winner(self):
+        self.assertIn("from sqlalchemy.exc import IntegrityError", SOURCE)
+        self.assertIn("except IntegrityError", SOURCE)
+        self.assertIn("db.session.rollback()", SOURCE)
+        self.assertIn("worker placement conflicted but no durable placement was found", SOURCE)
+
     def test_child_managers_are_single_daemon_and_do_not_run_expiry_loops(self):
         self.assertIn("worker_spec=worker", SOURCE)
         self.assertIn("manage_expiration=False", SOURCE)

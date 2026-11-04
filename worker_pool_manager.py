@@ -16,6 +16,7 @@ import time
 from apscheduler.schedulers import SchedulerNotRunningError
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from CTFd.models import db
 
@@ -249,7 +250,31 @@ class WorkerPoolContainerManager:
                     assigned_at=now,
                 )
             )
-            db.session.commit()
+            try:
+                db.session.commit()
+            except IntegrityError:
+                # The unique constraint is the final authority under a
+                # concurrent first launch for the same team/user.  MySQL
+                # advisory locks normally serialize admissions, but a caller
+                # must remain correct if a concurrent request crosses a
+                # process or connection boundary that has not acquired this
+                # process's lock.  Never retry a different placement: discard
+                # our transaction and adopt the durable winner.
+                db.session.rollback()
+                placement = ContainerWorkerPlacementModel.query.filter_by(
+                    event_id=key.event_id,
+                    release_id=key.release_id,
+                    scope_kind=key.scope_kind,
+                    scope_id=key.scope_id,
+                ).first()
+                if placement is None:
+                    raise ContainerException(
+                        "worker placement conflicted but no durable placement was found"
+                    )
+                try:
+                    return require_persisted_worker(placement.worker_id, self.worker_pool)
+                except RuntimePolicyError as err:
+                    raise ContainerException(str(err)) from err
             return worker
 
         worker = self._with_advisory_lock("docker-per-team:worker-placement-admission", select_or_create)

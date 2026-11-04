@@ -37,6 +37,10 @@ Cloud deployments may provide immutable worker settings:
 ```text
 CTF_DOCKER_BASE_URL=ssh://ctfworker@10.0.0.8
 CTF_DOCKER_PUBLIC_HOSTNAME=challenges.cybersea.ro
+CTF_CONTAINER_MEMORY_MB=1024
+CTF_CONTAINER_CPU_LIMIT=1.0
+CTF_CONTAINER_PIDS_LIMIT=512
+CTF_CONTAINER_TMPFS_SIZE_MB=256
 ```
 
 These override database defaults at runtime, so a new CTFd database can boot without first storing
@@ -134,6 +138,8 @@ Supported fields are:
 - `image`
 - `internal_port` in `challenge.yml` / `port` in the CTFd API
 - `connection_type` (`web` or `tcp`)
+- optional bounded resource overrides: `memory_limit_mb`, `cpu_limit`,
+  `pids_limit`, and `tmpfs_size_mb`
 - `flag_mode` (`static` or `random`)
 - `flag_prefix`, `flag_suffix`, and `random_flag_length`
 - optional `capabilities`, `volumes`, and `command`
@@ -150,16 +156,32 @@ flag_prefix: "CSCTF{"
 flag_suffix: "}"
 random_flag_length: 24
 capabilities: []
+resources:
+  memory_mb: 192
+  cpu: 0.5
+  pids: 128
+  tmpfs_mb: 16
 ```
 
 The repository deploy helper maps `internal_port` to the plugin API field `port`.
+It also maps the `resources` object to the four plugin resource fields. Missing
+values inherit the global event ceiling. Explicit values must be positive and
+may only reduce that ceiling; challenge metadata cannot grant itself more CPU,
+memory, PIDs, or temporary storage than the operator approved. The same check
+runs again immediately before launch so lowering a global ceiling fails closed
+for stale challenge rows. After Docker creates the container, the plugin
+inspects its applied memory/no-swap, CPU period/quota, PID and tmpfs values;
+any mismatch kills the instance and fails the launch. Successful create
+responses include the non-secret effective resource values for release smoke
+tests and player diagnostics.
 
 ## Current limits
 
 - One public TCP port and one container are supported per challenge.
 - UDP, multiple public services, Compose sidecars, Compose `sysctls`, and Compose `extra_hosts`
   are not reproduced by this launcher.
-- Resource values are one global safe ceiling, not measured per-challenge classes.
+- Global resource values are hard event ceilings. Optional per-challenge values
+  select smaller limits under those ceilings.
 - Direct random ports still require an explicit public port-range firewall policy.
 - The Docker socket is root-equivalent; CTFd belongs on a dedicated, hardened challenge worker.
 - The egress label is an operator attestation, not proof. Release evidence must include active

@@ -128,7 +128,51 @@ class RuntimeIdentityTests(unittest.TestCase):
                 ):
                     runtime_policy.RuntimeIdentity.from_environment(
                         runtime_environment(CTF_CHALLENGE_BIND_IP=value)
+        )
+
+
+class PlayerChallengeAccessTests(unittest.TestCase):
+    def test_players_cannot_access_hidden_or_locked_challenges(self):
+        for state in ("hidden", "locked"):
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(
+                    runtime_policy.RuntimePolicyError,
+                    "not available",
+                ):
+                    runtime_policy.validate_player_challenge_access(
+                        state=state,
+                        challenges_are_visible=True,
+                        admin=False,
                     )
+
+    def test_players_must_satisfy_valid_prerequisites(self):
+        with self.assertRaises(runtime_policy.RuntimePolicyError):
+            runtime_policy.validate_player_challenge_access(
+                state="visible",
+                challenges_are_visible=True,
+                admin=False,
+                requirements={"prerequisites": [3, 7, 999]},
+                existing_challenge_ids={3, 7},
+                solved_challenge_ids={3},
+            )
+        runtime_policy.validate_player_challenge_access(
+            state="visible",
+            challenges_are_visible=True,
+            admin=False,
+            requirements={"prerequisites": [3, 7, 999]},
+            existing_challenge_ids={3, 7},
+            solved_challenge_ids={3, 7},
+        )
+
+    def test_admins_can_manage_hidden_challenges(self):
+        runtime_policy.validate_player_challenge_access(
+            state="hidden",
+            challenges_are_visible=False,
+            admin=True,
+            requirements={"prerequisites": [3]},
+            existing_challenge_ids={3},
+            solved_challenge_ids=set(),
+        )
 
 
 class ImageReferenceTests(unittest.TestCase):
@@ -186,6 +230,65 @@ class ImageReferenceTests(unittest.TestCase):
             ),
             f"cybersea/rogue-update@sha256:{digest}",
         )
+
+
+class PinnedImageResolutionTests(unittest.TestCase):
+    IMAGE_ID = "sha256:" + "b" * 64
+
+    class Image:
+        def __init__(self, image_id):
+            self.id = image_id
+
+    def store(self, images):
+        def get_image(reference):
+            if reference not in images:
+                raise LookupError(reference)
+            return images[reference]
+
+        return get_image
+
+    def test_registry_digest_resolves_directly(self):
+        ref = "csctf26/web-apogee@sha256:" + "c" * 64
+        image = self.Image(self.IMAGE_ID)
+        self.assertEqual(
+            runtime_policy.resolve_pinned_image(ref, self.store({ref: image})),
+            (image, ref),
+        )
+
+    def test_loaded_image_runs_from_its_pinned_id(self):
+        image = self.Image(self.IMAGE_ID)
+        get_image = self.store({"csctf26/web-apogee:1": image})
+        self.assertEqual(
+            runtime_policy.resolve_pinned_image(
+                f"csctf26/web-apogee:1@{self.IMAGE_ID}", get_image
+            ),
+            (image, self.IMAGE_ID),
+        )
+
+    def test_retagged_image_is_refused(self):
+        get_image = self.store({"csctf26/web-apogee:1": self.Image("sha256:" + "d" * 64)})
+        with self.assertRaisesRegex(runtime_policy.RuntimePolicyError, "pinned"):
+            runtime_policy.resolve_pinned_image(
+                f"csctf26/web-apogee:1@{self.IMAGE_ID}", get_image
+            )
+
+    def test_untagged_digest_is_not_guessed(self):
+        get_image = self.store({})
+        with self.assertRaises(LookupError):
+            runtime_policy.resolve_pinned_image(
+                f"csctf26/web-apogee@{self.IMAGE_ID}", get_image
+            )
+
+    def test_pinned_tag_passes_production_validation(self):
+        identity = runtime_policy.RuntimeIdentity.from_environment(
+            runtime_environment(
+                CTF_TARGET_ID="production",
+                CTF_RELEASE_ID="cybersea26-r1",
+                CTF_EGRESS_POLICY="worker-firewall-default-deny",
+            )
+        )
+        ref = f"cybersea/rogue-update:cybersea26-r1@{self.IMAGE_ID}"
+        self.assertEqual(runtime_policy.validate_image_reference(ref, identity), ref)
 
 
 class DockerEndpointTests(unittest.TestCase):
@@ -348,6 +451,227 @@ class HardeningProfileTests(unittest.TestCase):
                 with self.assertRaises(runtime_policy.RuntimePolicyError):
                     runtime_policy.build_hardening_profile({key: "0"})
 
+    def test_per_challenge_resources_reduce_global_ceilings(self):
+        settings = {
+            "container_maxmemory": "1024",
+            "container_maxcpu": "1.0",
+            "container_pids_limit": "512",
+            "container_tmpfs_size_mb": "256",
+        }
+        overrides = {
+            "memory_limit_mb": 192,
+            "cpu_limit": 0.5,
+            "pids_limit": 96,
+            "tmpfs_size_mb": 16,
+        }
+
+        limits = runtime_policy.resolve_resource_limits(settings, overrides)
+        profile = runtime_policy.build_hardening_profile(settings, overrides)
+
+        self.assertEqual(
+            limits,
+            {
+                "memory_limit_mb": 192,
+                "cpu_limit": 0.5,
+                "pids_limit": 96,
+                "tmpfs_size_mb": 16,
+            },
+        )
+        self.assertEqual(profile["mem_limit"], "192m")
+        self.assertEqual(profile["memswap_limit"], "192m")
+        self.assertEqual(profile["cpu_quota"], 50000)
+        self.assertEqual(profile["pids_limit"], 96)
+        self.assertIn("size=16m", profile["tmpfs"]["/tmp"])
+
+    def test_per_challenge_resources_cannot_exceed_global_ceilings(self):
+        settings = {
+            "container_maxmemory": "1024",
+            "container_maxcpu": "1.0",
+            "container_pids_limit": "512",
+            "container_tmpfs_size_mb": "256",
+        }
+        invalid_overrides = (
+            {"memory_limit_mb": 1025},
+            {"cpu_limit": 1.01},
+            {"pids_limit": 513},
+            {"tmpfs_size_mb": 257},
+        )
+
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(
+                    runtime_policy.RuntimePolicyError,
+                    "exceeds the global",
+                ):
+                    runtime_policy.resolve_resource_limits(
+                        settings,
+                        overrides,
+                    )
+
+    def test_empty_per_challenge_resources_use_global_ceilings(self):
+        limits = runtime_policy.resolve_resource_limits(
+            {
+                "container_maxmemory": "768",
+                "container_maxcpu": "0.75",
+                "container_pids_limit": "300",
+                "container_tmpfs_size_mb": "96",
+            },
+            {
+                "memory_limit_mb": None,
+                "cpu_limit": "",
+            },
+        )
+        self.assertEqual(limits["memory_limit_mb"], 768)
+        self.assertEqual(limits["cpu_limit"], 0.75)
+        self.assertEqual(limits["pids_limit"], 300)
+        self.assertEqual(limits["tmpfs_size_mb"], 96)
+
+    def test_invalid_per_challenge_resources_fail_closed(self):
+        invalid_overrides = (
+            {"memory_limit_mb": 1.5},
+            {"cpu_limit": float("nan")},
+            {"pids_limit": 0},
+            {"tmpfs_size_mb": "invalid"},
+        )
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(runtime_policy.RuntimePolicyError):
+                    runtime_policy.resolve_resource_limits({}, overrides)
+
+    def test_applied_resource_attestation_matches_docker_inspect(self):
+        expected = {
+            "memory_limit_mb": 192,
+            "cpu_limit": 0.5,
+            "pids_limit": 96,
+            "tmpfs_size_mb": 16,
+        }
+        attrs = {
+            "HostConfig": {
+                "Memory": 192 * 1024 * 1024,
+                "MemorySwap": 192 * 1024 * 1024,
+                "CpuPeriod": 100000,
+                "CpuQuota": 50000,
+                "PidsLimit": 96,
+                "Tmpfs": {
+                    "/tmp": (
+                        "rw,noexec,nosuid,nodev,"
+                        "size=16m,mode=1777"
+                    )
+                },
+            },
+            "Config": {
+                "Labels": {
+                    "ctfd.resource.memory_mb": "192",
+                    "ctfd.resource.cpu": "0.5",
+                    "ctfd.resource.pids": "96",
+                    "ctfd.resource.tmpfs_mb": "16",
+                }
+            },
+        }
+
+        self.assertEqual(
+            runtime_policy.validate_applied_resource_limits(attrs, expected),
+            {
+                "memory_mb": 192,
+                "cpu": 0.5,
+                "pids": 96,
+                "tmpfs_mb": 16,
+            },
+        )
+
+    def test_applied_resource_attestation_rejects_any_drift(self):
+        expected = {
+            "memory_limit_mb": 192,
+            "cpu_limit": 0.5,
+            "pids_limit": 96,
+            "tmpfs_size_mb": 16,
+        }
+        valid_attrs = {
+            "HostConfig": {
+                "Memory": 192 * 1024 * 1024,
+                "MemorySwap": 192 * 1024 * 1024,
+                "CpuPeriod": 100000,
+                "CpuQuota": 50000,
+                "PidsLimit": 96,
+                "Tmpfs": {"/tmp": "rw,size=16m"},
+            },
+            "Config": {
+                "Labels": {
+                    "ctfd.resource.memory_mb": "192",
+                    "ctfd.resource.cpu": "0.5",
+                    "ctfd.resource.pids": "96",
+                    "ctfd.resource.tmpfs_mb": "16",
+                }
+            },
+        }
+        mutations = (
+            ("HostConfig", "Memory", 0),
+            ("HostConfig", "MemorySwap", -1),
+            ("HostConfig", "CpuQuota", 100000),
+            ("HostConfig", "PidsLimit", 512),
+            ("HostConfig", "Tmpfs", {}),
+            ("Config", "Labels", {}),
+        )
+
+        for section, key, value in mutations:
+            with self.subTest(section=section, key=key):
+                attrs = {
+                    "HostConfig": dict(valid_attrs["HostConfig"]),
+                    "Config": {
+                        "Labels": dict(
+                            valid_attrs["Config"]["Labels"]
+                        )
+                    },
+                }
+                attrs[section][key] = value
+                with self.assertRaisesRegex(
+                    runtime_policy.RuntimePolicyError,
+                    "did not apply",
+                ):
+                    runtime_policy.validate_applied_resource_limits(
+                        attrs,
+                        expected,
+                    )
+
+    def test_local_attestation_relaxes_only_missing_memory_controls(self):
+        expected = {
+            "memory_limit_mb": 192,
+            "cpu_limit": 0.5,
+            "pids_limit": 96,
+            "tmpfs_size_mb": 16,
+        }
+        attrs = {
+            "HostConfig": {
+                "Memory": 0,
+                "MemorySwap": 0,
+                "CpuPeriod": 100000,
+                "CpuQuota": 50000,
+                "PidsLimit": 96,
+                "Tmpfs": {"/tmp": "rw,size=16m"},
+            },
+            "Config": {
+                "Labels": {
+                    "ctfd.resource.memory_mb": "192",
+                    "ctfd.resource.cpu": "0.5",
+                    "ctfd.resource.pids": "96",
+                    "ctfd.resource.tmpfs_mb": "16",
+                }
+            },
+        }
+
+        runtime_policy.validate_applied_resource_limits(
+            attrs,
+            expected,
+            allow_missing_memory=True,
+        )
+        attrs["HostConfig"]["CpuQuota"] = 0
+        with self.assertRaises(runtime_policy.RuntimePolicyError):
+            runtime_policy.validate_applied_resource_limits(
+                attrs,
+                expected,
+                allow_missing_memory=True,
+            )
+
     def test_cpu_limit_must_be_finite(self):
         for value in ("nan", "inf", "-inf"):
             with self.subTest(value=value):
@@ -484,6 +808,25 @@ class AccountRateLimitKeyTests(unittest.TestCase):
                         is_team=True,
                         endpoint="containers.route_request_container",
                     )
+
+
+class RootImageExceptionTests(unittest.TestCase):
+    allowed = staticmethod(runtime_policy.root_image_exception_allowed)
+
+    def test_listed_challenge_with_drop_privilege_capabilities_is_allowed(self):
+        for caps in ([], ["CHOWN"], ["chown", "setuid", "setgid"], ["SETUID", "SETGID"], ["CHOWN", "SETUID", "SETGID", "KILL"]):
+            with self.subTest(caps=caps):
+                self.assertTrue(self.allowed("Apogee", caps, "Apogee, Other"))
+
+    def test_unlisted_or_empty_settings_are_refused(self):
+        for name, setting in (("Apogee", ""), ("Cutover", "Apogee"), ("", "Apogee"), ("apogee", "Apogee")):
+            with self.subTest(name=name, setting=setting):
+                self.assertFalse(self.allowed(name, ["CHOWN"], setting))
+
+    def test_any_capability_beyond_the_three_is_refused(self):
+        for extra in ("SYS_ADMIN", "DAC_OVERRIDE", "NET_RAW", "SYS_PTRACE", "FOWNER"):
+            with self.subTest(extra=extra):
+                self.assertFalse(self.allowed("Apogee", ["CHOWN", "SETUID", "SETGID", "KILL", extra], "Apogee"))
 
 
 if __name__ == "__main__":

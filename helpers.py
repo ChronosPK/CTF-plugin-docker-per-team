@@ -7,9 +7,11 @@ from contextlib import contextmanager
 from flask import has_request_context, jsonify, request
 from sqlalchemy import text
 
-from CTFd.models import Flags, Solves, db
+from CTFd.models import Challenges, Flags, Solves, db
 from CTFd.utils import get_config
-from CTFd.utils.user import get_current_user
+from CTFd.utils.challenges import get_solve_ids_for_user_id
+from CTFd.utils.config.visibility import challenges_visible
+from CTFd.utils.user import get_current_user, is_admin
 
 from .models import (
     ContainerChallengeModel,
@@ -18,6 +20,7 @@ from .models import (
     ContainerInfoModel,
     ContainerSettingsModel,
 )
+from .runtime_policy import RuntimePolicyError, validate_player_challenge_access
 
 
 def get_settings_path():
@@ -32,6 +35,11 @@ RUNTIME_SETTING_ENVIRONMENT = {
     "docker_base_url": "CTF_DOCKER_BASE_URL",
     "docker_hostname": "CTF_DOCKER_PUBLIC_HOSTNAME",
     "challenge_network": "CTF_CHALLENGE_NETWORK",
+    "container_maxmemory": "CTF_CONTAINER_MEMORY_MB",
+    "container_maxcpu": "CTF_CONTAINER_CPU_LIMIT",
+    "container_pids_limit": "CTF_CONTAINER_PIDS_LIMIT",
+    "container_tmpfs_size_mb": "CTF_CONTAINER_TMPFS_SIZE_MB",
+    "max_containers": "CTF_MAX_CONTAINERS_PER_TEAM",
 }
 SECURE_NONZERO_DEFAULTS = {
     "container_expiration",
@@ -86,12 +94,16 @@ def is_team_mode():
     return get_config("user_mode") == TEAMS_MODE
 
 
-def build_connection_payload(container_manager, challenge, port, expires):
+def build_connection_payload(container_manager, challenge, port, expires, *, hostname=None):
     connect = (challenge.connection_type or "tcp").strip().lower()
 
+    # Persisted instance hostname wins.  This is essential once a team is
+    # bound to a worker: a later pool/config change must not send it to another
+    # worker's public address.
+    persisted_hostname = str(hostname or "").strip()
     configured_hostname = (container_manager.settings.get("docker_hostname", "") or "").strip()
     request_hostname = request.host.split(":", 1)[0] if has_request_context() else ""
-    hostname = configured_hostname or request_hostname
+    hostname = persisted_hostname or configured_hostname or request_hostname
 
     if connect == "tcp":
         endpoint = f"{hostname}:{port}" if hostname else str(port)
@@ -111,6 +123,34 @@ def build_connection_payload(container_manager, challenge, port, expires):
 def solve_exists_for_account(challenge_id, xid):
     field = Solves.team_id if is_team_mode() else Solves.user_id
     return Solves.query.filter(Solves.challenge_id == challenge_id, field == xid).first()
+
+
+def enforce_player_challenge_access(challenge):
+    user = get_current_user()
+    requirements = challenge.requirements or {}
+    existing_ids = None
+    solved_ids = None
+    if requirements:
+        existing_ids = {
+            challenge_id
+            for challenge_id, in Challenges.query.with_entities(Challenges.id).all()
+        }
+        solved_ids = (
+            get_solve_ids_for_user_id(user.id)
+            if user is not None
+            else set()
+        )
+    try:
+        validate_player_challenge_access(
+            state=str(challenge.state or ""),
+            challenges_are_visible=bool(challenges_visible()),
+            admin=bool(is_admin()),
+            requirements=requirements,
+            existing_challenge_ids=existing_ids,
+            solved_challenge_ids=solved_ids,
+        )
+    except RuntimePolicyError as error:
+        raise ValueError("Challenge is not available.") from error
 
 
 def cleanup_container_records(container_info, commit=True):
@@ -208,6 +248,7 @@ def renew_container(container_manager, chal_id, xid, is_team):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
     if challenge is None:
         return jsonify({"error": "Challenge not found"}), 400
+    enforce_player_challenge_access(challenge)
 
     running_container = ContainerInfoModel.query.filter_by(
         challenge_id=challenge.id,
@@ -242,6 +283,7 @@ def renew_container(container_manager, chal_id, xid, is_team):
                     challenge,
                     running_container.port,
                     running_container.expires,
+                    hostname=running_container.hostname,
                 ),
             }
         )
@@ -262,6 +304,7 @@ def create_container(container_manager, chal_id, xid, is_team):
         challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
         if challenge is None:
             return jsonify({"error": "Challenge not found"}), 400
+        enforce_player_challenge_access(challenge)
 
         if solve_exists_for_account(chal_id, xid):
             return jsonify({"error": "Challenge already solved"}), 400
@@ -306,6 +349,7 @@ def create_container(container_manager, chal_id, xid, is_team):
                         challenge,
                         running_container.port,
                         running_container.expires,
+                        hostname=running_container.hostname,
                     ),
                 }
             )
@@ -318,20 +362,23 @@ def create_container(container_manager, chal_id, xid, is_team):
     return jsonify(
         {
             "status": "created",
-                **build_connection_payload(
-                    container_manager,
-                    challenge,
-                    created_container["port"],
-                    created_container["expires"],
-                ),
-            }
-        )
+            "resources": created_container["resources"],
+            **build_connection_payload(
+                container_manager,
+                challenge,
+                created_container["port"],
+                created_container["expires"],
+                hostname=created_container.get("hostname"),
+            ),
+        }
+    )
 
 
 def view_container_info(container_manager, chal_id, xid, is_team):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
     if challenge is None:
         return jsonify({"error": "Challenge not found"}), 400
+    enforce_player_challenge_access(challenge)
 
     running_container = ContainerInfoModel.query.filter_by(
         challenge_id=challenge.id,
@@ -350,6 +397,7 @@ def view_container_info(container_manager, chal_id, xid, is_team):
                             challenge,
                             running_container.port,
                             running_container.expires,
+                            hostname=running_container.hostname,
                         ),
                     }
                 )
@@ -365,6 +413,7 @@ def connect_type(chal_id):
     challenge = ContainerChallengeModel.query.filter_by(id=chal_id).first()
     if challenge is None:
         return jsonify({"error": "Challenge not found"}), 400
+    enforce_player_challenge_access(challenge)
     return jsonify({"status": "Ok", "connect": challenge.connection_type})
 
 
@@ -421,10 +470,38 @@ def get_expected_static_flag(challenge):
     return f"{challenge.flag_prefix}{flag_content}{challenge.flag_suffix}"
 
 
+def flag_case_insensitive(challenge):
+    """True only when the author explicitly asked for a case-insensitive flag.
+
+    Reuses CTFd's own per-flag convention: the Flags row's `data` column holds
+    "case_insensitive" or "case_sensitive", set from the normal CTFd admin UI.
+    Anything else, including an empty value, means case sensitive.
+    """
+    flag_obj = Flags.query.filter_by(challenge_id=challenge.id).first()
+    if not flag_obj:
+        return False
+    return str(getattr(flag_obj, "data", "") or "").strip().lower() == "case_insensitive"
+
+
+def flags_match(challenge, submitted, stored):
+    """Compare a submitted flag against a stored one, honouring the challenge setting.
+
+    This has to exist because MariaDB's default collation is case INSENSITIVE, so a
+    `filter_by(flag=submitted)` lookup matches rows that differ only in case. Every
+    such lookup is re-checked here, otherwise the database silently overrides the
+    per-challenge setting and every container flag behaves case-insensitively.
+    """
+    if submitted is None or stored is None:
+        return False
+    if flag_case_insensitive(challenge):
+        return str(submitted).casefold() == str(stored).casefold()
+    return str(submitted) == str(stored)
+
+
 def get_container_flag(submitted_flag, user, container_manager, container_info, challenge):
     owner_filters = get_submission_owner_filters(user)
 
-    if container_info and submitted_flag == container_info.flag:
+    if container_info and flags_match(challenge, submitted_flag, container_info.flag):
         container_flag = ContainerFlagModel.query.filter_by(
             challenge_id=challenge.id,
             container_id=container_info.container_id,
@@ -445,10 +522,14 @@ def get_container_flag(submitted_flag, user, container_manager, container_info, 
         flag=submitted_flag,
         **owner_filters,
     ).first()
+    if owned_flag and not flags_match(challenge, submitted_flag, owned_flag.flag):
+        owned_flag = None
     if owned_flag:
         return owned_flag
 
-    if challenge.flag_mode == "static" and submitted_flag == get_expected_static_flag(challenge):
+    if challenge.flag_mode == "static" and flags_match(
+        challenge, submitted_flag, get_expected_static_flag(challenge)
+    ):
         container_flag = ContainerFlagModel.query.filter_by(
             challenge_id=challenge.id,
             flag=submitted_flag,
@@ -468,6 +549,8 @@ def get_container_flag(submitted_flag, user, container_manager, container_info, 
         challenge_id=challenge.id,
         flag=submitted_flag,
     ).first()
+    if container_flag and not flags_match(challenge, submitted_flag, container_flag.flag):
+        container_flag = None
 
     if is_team_mode():
         if (

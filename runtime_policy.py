@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 IDENTITY_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 NETWORK_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 IMAGE_DIGEST_PATTERN = re.compile(r"@sha256:[0-9a-f]{64}$")
+PINNED_REFERENCE_PATTERN = re.compile(r"^(?P<name>[^@]+)@(?P<digest>sha256:[0-9a-f]{64})$")
 LOG_SIZE_PATTERN = re.compile(r"^[1-9][0-9]*[kmg]$")
 
 REQUIRED_ENVIRONMENT = (
@@ -54,9 +55,51 @@ DEFAULT_LOG_MAX_SIZE = "10m"
 DEFAULT_LOG_MAX_FILES = 3
 DEFAULT_START_TIMEOUT_SECONDS = 60
 
+RESOURCE_OVERRIDE_FIELDS = {
+    "memory_limit_mb": ("container_maxmemory", DEFAULT_MEMORY_MB, "integer"),
+    "cpu_limit": ("container_maxcpu", DEFAULT_CPU_LIMIT, "number"),
+    "pids_limit": ("container_pids_limit", DEFAULT_PIDS_LIMIT, "integer"),
+    "tmpfs_size_mb": (
+        "container_tmpfs_size_mb",
+        DEFAULT_TMPFS_SIZE_MB,
+        "integer",
+    ),
+}
+
 
 class RuntimePolicyError(ValueError):
     """Raised when runtime identity or hardening configuration is unsafe."""
+
+
+def validate_player_challenge_access(
+    *,
+    state: str,
+    challenges_are_visible: bool,
+    admin: bool,
+    requirements: Mapping[str, object] | None = None,
+    existing_challenge_ids: set[int] | None = None,
+    solved_challenge_ids: set[int] | None = None,
+) -> None:
+    """Enforce the same hidden/locked/prerequisite boundary as CTFd's API."""
+
+    if admin:
+        return
+    if not challenges_are_visible or state in {"hidden", "locked"}:
+        raise RuntimePolicyError("Challenge is not available.")
+
+    requirements = requirements or {}
+    raw_prerequisites = requirements.get("prerequisites", [])
+    if not isinstance(raw_prerequisites, (list, tuple, set)):
+        raise RuntimePolicyError("Challenge is not available.")
+    try:
+        prerequisites = {int(value) for value in raw_prerequisites}
+    except (TypeError, ValueError) as error:
+        raise RuntimePolicyError("Challenge is not available.") from error
+
+    if existing_challenge_ids is not None:
+        prerequisites.intersection_update(existing_challenge_ids)
+    if not prerequisites.issubset(solved_challenge_ids or set()):
+        raise RuntimePolicyError("Challenge is not available.")
 
 
 def _required_value(environment: Mapping[str, str], name: str) -> str:
@@ -311,6 +354,25 @@ def validate_challenge_network_attributes(
         )
 
 
+# The only capabilities a root entrypoint needs to prepare its tmpfs, drop each process to its own
+# user, and stop its own children when one dies (KILL is limited to the container's PID namespace).
+# A listed challenge may run a root image only when it adds nothing beyond these.
+ROOT_EXCEPTION_CAPABILITIES = frozenset({"CHOWN", "SETUID", "SETGID", "KILL"})
+
+
+def root_image_exception_allowed(
+    challenge_name: str,
+    requested_capabilities,
+    root_image_challenges: str,
+) -> bool:
+    """Whether a challenge may use a root image: it must be named in the comma-separated
+    `root_image_challenges` setting and request only ROOT_EXCEPTION_CAPABILITIES. All other
+    hardening (cap_drop ALL, no-new-privileges, read-only root, limits) still applies."""
+    listed = {name.strip() for name in (root_image_challenges or "").split(",") if name.strip()}
+    requested = {str(capability).strip().upper() for capability in requested_capabilities or ()}
+    return bool(challenge_name) and challenge_name in listed and requested <= ROOT_EXCEPTION_CAPABILITIES
+
+
 def validate_image_reference(image: str, identity: RuntimeIdentity) -> str:
     """Reject malformed images and require a digest on production targets."""
 
@@ -328,6 +390,30 @@ def validate_image_reference(image: str, identity: RuntimeIdentity) -> str:
             "Production container images must be referenced by @sha256 digest"
         )
     return value
+
+
+def resolve_pinned_image(reference: str, get_image, not_found=LookupError):
+    """Return ``(image, run_reference)`` for an already validated image reference.
+
+    A registry digest (``repo@sha256:<manifest digest>``) resolves directly. Images loaded
+    with ``docker load`` on the classic image store carry no registry digest, so
+    ``repo:tag@sha256:<image id>`` is accepted as well: the tag must currently point at
+    exactly that image ID, and the container then runs from the immutable ID rather than
+    the mutable tag.
+    """
+
+    try:
+        return get_image(reference), reference
+    except not_found:
+        match = PINNED_REFERENCE_PATTERN.match(reference)
+        if match is None or ":" not in match["name"].rsplit("/", 1)[-1]:
+            raise
+    image = get_image(match["name"])
+    if getattr(image, "id", None) != match["digest"]:
+        raise RuntimePolicyError(
+            "Container image tag does not match its pinned @sha256 image ID"
+        )
+    return image, match["digest"]
 
 
 def validate_docker_endpoint(value: str, identity: RuntimeIdentity) -> str:
@@ -385,21 +471,68 @@ def _positive_float(settings: Mapping[str, str], key: str, default: float) -> fl
     return value
 
 
-def build_hardening_profile(settings: Mapping[str, str]) -> dict:
+def resolve_resource_limits(
+    settings: Mapping[str, str],
+    overrides: Mapping[str, object] | None = None,
+) -> dict[str, int | float]:
+    """Resolve optional per-challenge limits under immutable global ceilings."""
+
+    overrides = overrides or {}
+    resolved: dict[str, int | float] = {}
+
+    for override_key, (
+        setting_key,
+        default,
+        value_type,
+    ) in RESOURCE_OVERRIDE_FIELDS.items():
+        if value_type == "integer":
+            ceiling: int | float = _positive_int(settings, setting_key, int(default))
+        else:
+            ceiling = _positive_float(settings, setting_key, float(default))
+
+        raw_override = overrides.get(override_key)
+        if raw_override is None or raw_override == "":
+            resolved[override_key] = ceiling
+            continue
+
+        try:
+            if value_type == "integer":
+                if isinstance(raw_override, float) and not raw_override.is_integer():
+                    raise ValueError
+                value: int | float = int(raw_override)
+            else:
+                value = float(raw_override)
+        except (TypeError, ValueError) as error:
+            expected = "an integer" if value_type == "integer" else "a number"
+            raise RuntimePolicyError(
+                f"{override_key} must be {expected}"
+            ) from error
+
+        if not math.isfinite(float(value)) or value <= 0:
+            raise RuntimePolicyError(
+                f"{override_key} must be greater than zero"
+            )
+        if value > ceiling:
+            raise RuntimePolicyError(
+                f"{override_key}={value:g} exceeds the global "
+                f"{setting_key} ceiling of {ceiling:g}"
+            )
+        resolved[override_key] = value
+
+    return resolved
+
+
+def build_hardening_profile(
+    settings: Mapping[str, str],
+    overrides: Mapping[str, object] | None = None,
+) -> dict:
     """Build the Docker SDK kwargs that every challenge container receives."""
 
-    memory_mb = _positive_int(
-        settings, "container_maxmemory", DEFAULT_MEMORY_MB
-    )
-    cpu_limit = _positive_float(
-        settings, "container_maxcpu", DEFAULT_CPU_LIMIT
-    )
-    pids_limit = _positive_int(
-        settings, "container_pids_limit", DEFAULT_PIDS_LIMIT
-    )
-    tmpfs_size_mb = _positive_int(
-        settings, "container_tmpfs_size_mb", DEFAULT_TMPFS_SIZE_MB
-    )
+    resource_limits = resolve_resource_limits(settings, overrides)
+    memory_mb = int(resource_limits["memory_limit_mb"])
+    cpu_limit = float(resource_limits["cpu_limit"])
+    pids_limit = int(resource_limits["pids_limit"])
+    tmpfs_size_mb = int(resource_limits["tmpfs_size_mb"])
     log_max_files = _positive_int(
         settings, "container_log_max_files", DEFAULT_LOG_MAX_FILES
     )
@@ -434,6 +567,91 @@ def build_hardening_profile(settings: Mapping[str, str]) -> dict:
                 "max-file": str(log_max_files),
             },
         },
+    }
+
+
+def validate_applied_resource_limits(
+    attrs: Mapping[str, object],
+    expected: Mapping[str, int | float],
+    *,
+    allow_missing_memory: bool = False,
+) -> dict[str, int | float]:
+    """Verify Docker inspect data matches the selected resource policy."""
+
+    host_config = attrs.get("HostConfig", {}) or {}
+    config = attrs.get("Config", {}) or {}
+    if not isinstance(host_config, Mapping) or not isinstance(config, Mapping):
+        raise RuntimePolicyError("Docker inspect returned invalid resource metadata")
+    labels = config.get("Labels", {}) or {}
+    if not isinstance(labels, Mapping):
+        raise RuntimePolicyError("Docker inspect returned invalid container labels")
+
+    memory_mb = int(expected["memory_limit_mb"])
+    cpu_limit = float(expected["cpu_limit"])
+    pids_limit = int(expected["pids_limit"])
+    tmpfs_size_mb = int(expected["tmpfs_size_mb"])
+    checks = {
+        "memory": (
+            int(host_config.get("Memory") or 0),
+            memory_mb * 1024 * 1024,
+        ),
+        "memory+swap": (
+            int(host_config.get("MemorySwap") or 0),
+            memory_mb * 1024 * 1024,
+        ),
+        "CPU period": (
+            int(host_config.get("CpuPeriod") or 0),
+            100000,
+        ),
+        "CPU quota": (
+            int(host_config.get("CpuQuota") or 0),
+            int(cpu_limit * 100000),
+        ),
+        "PID": (
+            int(host_config.get("PidsLimit") or 0),
+            pids_limit,
+        ),
+    }
+    mismatches = []
+    for name, (actual, wanted) in checks.items():
+        if allow_missing_memory and name in {"memory", "memory+swap"}:
+            continue
+        if actual != wanted:
+            mismatches.append(f"{name}={actual} expected={wanted}")
+
+    tmpfs = host_config.get("Tmpfs") or {}
+    tmpfs_options = (
+        str(tmpfs.get("/tmp", "") or "")
+        if isinstance(tmpfs, Mapping)
+        else ""
+    )
+    if f"size={tmpfs_size_mb}m" not in tmpfs_options:
+        mismatches.append(
+            f"/tmp={tmpfs_options!r} expected size={tmpfs_size_mb}m"
+        )
+
+    expected_labels = {
+        "ctfd.resource.memory_mb": str(memory_mb),
+        "ctfd.resource.cpu": f"{cpu_limit:g}",
+        "ctfd.resource.pids": str(pids_limit),
+        "ctfd.resource.tmpfs_mb": str(tmpfs_size_mb),
+    }
+    for key, value in expected_labels.items():
+        if labels.get(key) != value:
+            mismatches.append(
+                f"label {key}={labels.get(key)!r} expected={value!r}"
+            )
+
+    if mismatches:
+        raise RuntimePolicyError(
+            "Docker did not apply the challenge resource policy: "
+            + "; ".join(mismatches)
+        )
+    return {
+        "memory_mb": memory_mb,
+        "cpu": cpu_limit,
+        "pids": pids_limit,
+        "tmpfs_mb": tmpfs_size_mb,
     }
 
 

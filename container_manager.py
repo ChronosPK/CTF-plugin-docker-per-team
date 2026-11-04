@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from CTFd.models import db, Flags
+from .healthcheck import ContainerHealthError, wait_until_healthy
 from .helpers import (
     cleanup_container_records,
     parse_capabilities_value,
@@ -27,11 +28,16 @@ from .runtime_policy import (
     build_hardening_profile,
     get_start_timeout_seconds,
     public_runtime_fingerprint,
+    resolve_pinned_image,
+    resolve_resource_limits,
+    root_image_exception_allowed,
+    validate_applied_resource_limits,
     validate_challenge_network_attributes,
     validate_daemon_capabilities,
     validate_docker_endpoint,
     validate_image_reference,
 )
+from .worker_pool import load_worker_pool
 
 
 def generate_random_flag(challenge):
@@ -105,8 +111,14 @@ class ContainerManager:
             )
             profile = build_hardening_profile(settings)
             get_start_timeout_seconds(settings)
+            workers = load_worker_pool(os.environ, identity, settings)
         except RuntimePolicyError as err:
             raise ContainerException(str(err))
+        if len(workers) != 1:
+            raise ContainerException(
+                "Multi-worker Docker inventory is not enabled until placement-aware "
+                "lifecycle routing is installed"
+            )
 
         docker_base_url = (settings.get("docker_base_url") or "").strip()
         try:
@@ -195,6 +207,19 @@ class ContainerManager:
         self.settings = dict(settings)
         self.settings["challenge_network"] = self.identity.challenge_network
         try:
+            self.worker_pool = load_worker_pool(
+                os.environ,
+                self.identity,
+                self.settings,
+            )
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
+        if len(self.worker_pool) != 1:
+            raise ContainerException(
+                "Multi-worker Docker inventory is not enabled until placement-aware "
+                "lifecycle routing is installed"
+            )
+        try:
             self.hardening_profile = build_hardening_profile(self.settings)
             self.start_timeout_seconds = get_start_timeout_seconds(self.settings)
         except RuntimePolicyError as err:
@@ -214,12 +239,11 @@ class ContainerManager:
         except RuntimePolicyError as err:
             raise ContainerException(str(err))
 
-        # Connect to the docker daemon
-        try:
-            self.initialize_connection(self.settings, app)
-        except ContainerException as err:
-            self.connection_error = str(err)
-            print(f"Docker container service is unavailable: {err}")
+        # CTFd must remain available when the independent challenge host is
+        # offline. The existing run_command wrapper establishes and validates
+        # the authenticated Docker connection only when a container action is
+        # requested.
+        self.connection_error = "Connection deferred until a container action is requested."
 
     def initialize_connection(self, settings, app) -> None:
         self.settings = dict(settings)
@@ -386,7 +410,7 @@ class ContainerManager:
                 "Challenge network must be separate from the CTFd application network"
             )
 
-    def _get_owned_container(self, container_id: str):
+    def _get_owned_container(self, container_id: str, *, worker_id: str | None = None):
         try:
             container = self.client.containers.get(container_id)
         except docker.errors.NotFound:
@@ -396,6 +420,20 @@ class ContainerManager:
             raise ContainerException(
                 "Refusing to operate on a container owned by another or an "
                 "unlabelled event"
+            )
+        # Legacy instances predate the ownership label.  They are tolerated
+        # only on the retained single primary worker; a multi-worker launch
+        # must never infer ownership from an absent label.
+        observed_worker_id = labels.get("ctfd.worker_id")
+        if (
+            worker_id == "primary"
+            and observed_worker_id is None
+            and len(self.worker_pool) == 1
+        ):
+            return container
+        if worker_id and observed_worker_id != worker_id:
+            raise ContainerException(
+                "Refusing to operate on a container bound to another Docker worker"
             )
         return container
 
@@ -409,17 +447,30 @@ class ContainerManager:
             raise ContainerException(str(err))
 
         try:
-            image = self.client.images.get(image_reference)
-        except docker.errors.ImageNotFound:
+            image, image_reference = resolve_pinned_image(
+                image_reference, self.client.images.get, docker.errors.NotFound
+            )
+        except docker.errors.NotFound:
             raise ContainerException("Docker image not found")
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
 
         config = image.attrs.get("Config", {}) or {}
         configured_user = str(config.get("User", "") or "").strip().lower()
         user_name = configured_user.split(":", 1)[0]
         if not user_name or user_name in {"0", "root"}:
-            raise ContainerException(
-                "Challenge image must declare a non-root USER"
-            )
+            try:
+                requested = parse_capabilities_value(getattr(challenge, "capabilities", "") or "")
+            except ValueError as err:
+                raise ContainerException(str(err))
+            if not root_image_exception_allowed(
+                getattr(challenge, "name", ""),
+                requested,
+                self.settings.get("root_image_challenges", ""),
+            ):
+                raise ContainerException(
+                    "Challenge image must declare a non-root USER"
+                )
 
         healthcheck = config.get("Healthcheck") or {}
         health_test = healthcheck.get("Test") or []
@@ -437,30 +488,27 @@ class ContainerManager:
         return image_reference
 
     def _wait_until_healthy(self, container) -> None:
-        deadline = time.monotonic() + self.start_timeout_seconds
-        while time.monotonic() < deadline:
-            container.reload()
-            state = container.attrs.get("State", {}) or {}
-            status = str(state.get("Status", "")).lower()
-            if status in {"dead", "exited", "removing"}:
-                raise ContainerException(
-                    f"Challenge container exited during startup (status={status})"
-                )
+        try:
+            wait_until_healthy(container, self.start_timeout_seconds)
+        except ContainerHealthError as err:
+            raise ContainerException(str(err)) from err
 
-            health_status = str(
-                (state.get("Health") or {}).get("Status", "")
-            ).lower()
-            if health_status == "healthy":
-                return
-            if health_status == "unhealthy":
-                raise ContainerException(
-                    "Challenge container failed its health check"
-                )
-            time.sleep(0.25)
+    def _verify_applied_resource_limits(
+        self,
+        container,
+        expected: dict[str, int | float],
+    ) -> dict[str, int | float]:
+        """Fail closed if Docker did not apply the selected resource policy."""
 
-        raise ContainerException(
-            "Challenge container did not become healthy before the startup timeout"
-        )
+        container.reload()
+        try:
+            return validate_applied_resource_limits(
+                container.attrs,
+                expected,
+                allow_missing_memory=self.allow_limited_local_daemon,
+            )
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
 
     def _generate_unique_random_flag(self, challenge) -> str:
         for _ in range(10):
@@ -547,7 +595,15 @@ class ContainerManager:
 
     @run_command
     def is_container_running(self, container_id: str) -> bool:
-        container = self._get_owned_container(container_id)
+        container_info = ContainerInfoModel.query.filter_by(
+            container_id=container_id
+        ).first()
+        if container_info is None:
+            return False
+        container = self._get_owned_container(
+            container_id,
+            worker_id=container_info.worker_id,
+        )
         if container is None:
             return False
         return container.status == "running"
@@ -571,7 +627,23 @@ class ContainerManager:
         # Recheck the daemon and event network immediately before every launch.
         # A network can be deleted/recreated while CTFd remains up.
         self._validate_live_runtime_boundary()
-        kwargs = dict(self.hardening_profile)
+        resource_overrides = {
+            "memory_limit_mb": challenge.memory_limit_mb,
+            "cpu_limit": challenge.cpu_limit,
+            "pids_limit": challenge.pids_limit,
+            "tmpfs_size_mb": challenge.tmpfs_size_mb,
+        }
+        try:
+            resource_limits = resolve_resource_limits(
+                self.settings,
+                resource_overrides,
+            )
+            kwargs = build_hardening_profile(
+                self.settings,
+                resource_overrides,
+            )
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
         log_config = kwargs.pop("log_config")
         kwargs["log_config"] = docker.types.LogConfig(
             type=log_config["type"],
@@ -650,6 +722,15 @@ class ContainerManager:
             "ctfd.challenge_id": str(challenge.id),
             "ctfd.scope": "team" if is_team else "user",
             "ctfd.scope_id": str(xid),
+            "ctfd.worker_id": self.worker_pool[0].worker_id,
+            "ctfd.resource.memory_mb": str(
+                resource_limits["memory_limit_mb"]
+            ),
+            "ctfd.resource.cpu": f"{resource_limits['cpu_limit']:g}",
+            "ctfd.resource.pids": str(resource_limits["pids_limit"]),
+            "ctfd.resource.tmpfs_mb": str(
+                resource_limits["tmpfs_size_mb"]
+            ),
             **self.identity.labels(),
         }
 
@@ -671,6 +752,10 @@ class ContainerManager:
                 **kwargs,
             )
 
+            applied_resources = self._verify_applied_resource_limits(
+                container,
+                resource_limits,
+            )
             self._wait_until_healthy(container)
             port = self.get_container_port(container.id)
             if port is None:
@@ -684,7 +769,8 @@ class ContainerManager:
                 team_id=xid if is_team else None,
                 user_id=None if is_team else xid,
                 port=port,
-                hostname=None,
+                hostname=(self.settings.get("docker_hostname", "") or "").strip() or None,
+                worker_id=self.worker_pool[0].worker_id,
                 flag=flag,
                 timestamp=timestamp,
                 expires=expires,
@@ -705,6 +791,9 @@ class ContainerManager:
                 "container": container,
                 "expires": expires,
                 "port": port,
+                "hostname": new_container_entry.hostname,
+                "worker_id": new_container_entry.worker_id,
+                "resources": applied_resources,
             }
         except IntegrityError:
             db.session.rollback()
@@ -738,7 +827,15 @@ class ContainerManager:
     @run_command
     def get_container_port(self, container_id: str) -> "str|None":
         try:
-            container = self._get_owned_container(container_id)
+            container_info = ContainerInfoModel.query.filter_by(
+                container_id=container_id
+            ).first()
+            if container_info is None:
+                return None
+            container = self._get_owned_container(
+                container_id,
+                worker_id=container_info.worker_id,
+            )
             if container is None:
                 return None
             for port in list(container.ports.values()):
@@ -756,8 +853,12 @@ class ContainerManager:
 
         images_list = set()
         for image in images:
-            references = list(image.tags or []) + list(
-                image.attrs.get("RepoDigests", []) or []
+            # Tags pinned to their image ID are offered too, so locally loaded images
+            # (which have no RepoDigests) still have a reference production accepts.
+            references = (
+                list(image.tags or [])
+                + [f"{tag}@{image.id}" for tag in image.tags or []]
+                + list(image.attrs.get("RepoDigests", []) or [])
             )
             for reference in references:
                 try:
@@ -775,7 +876,10 @@ class ContainerManager:
         ).first()
 
         try:
-            container = self._get_owned_container(container_id)
+            container = self._get_owned_container(
+                container_id,
+                worker_id=container_info.worker_id if container_info else None,
+            )
             if container is not None:
                 container.kill()
         except docker.errors.APIError as err:

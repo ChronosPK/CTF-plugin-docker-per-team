@@ -36,6 +36,7 @@ def normalize_settings_payload(form):
     advanced_fields = [
         "allow_challenge_volumes",
         "allowed_capabilities",
+        "root_image_challenges",
     ]
     defaults = settings_to_dict(ContainerSettingsModel.query.all())
 

@@ -29,6 +29,8 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
     def test_worker_capacity_is_enforced_before_new_placement(self):
         self.assertIn("worker.max_active_instances", SOURCE)
         self.assertIn("ContainerInfoModel.expires > now", SOURCE)
+        self.assertIn("minimum_load = min(active for active, _ in eligible_loads)", SOURCE)
+        self.assertIn("if active == minimum_load", SOURCE)
         self.assertIn("no healthy Docker worker has launch capacity", (ROOT / "placement.py").read_text(encoding="utf-8"))
 
     def test_child_managers_are_single_daemon_and_do_not_run_expiry_loops(self):

@@ -209,7 +209,7 @@ class WorkerPoolContainerManager:
                     raise ContainerException(str(err)) from err
 
             now = int(time.time())
-            eligible = []
+            eligible_loads = []
             for worker in self.worker_pool:
                 # Rows are the admission ledger.  We intentionally count an
                 # expired-but-not-yet-pruned row conservatively until the
@@ -219,7 +219,22 @@ class WorkerPoolContainerManager:
                     ContainerInfoModel.expires > now,
                 ).count()
                 if active < worker.max_active_instances:
-                    eligible.append(worker.worker_id)
+                    eligible_loads.append((active, worker.worker_id))
+            # Teams retain one durable worker, so each new team may create up
+            # to the per-team container cap on that worker.  A hash across all
+            # non-full workers has avoidable statistical skew and can reject a
+            # 600x3 launch even though aggregate capacity is exactly 1,800.
+            # Select only the least-loaded eligible workers; the existing
+            # digest remains a deterministic tie-breaker and the persisted row
+            # prevents later migration.
+            eligible = []
+            if eligible_loads:
+                minimum_load = min(active for active, _ in eligible_loads)
+                eligible = [
+                    worker_id
+                    for active, worker_id in eligible_loads
+                    if active == minimum_load
+                ]
             try:
                 worker = choose_initial_worker(key, self.worker_pool, eligible_worker_ids=eligible)
             except RuntimePolicyError as err:

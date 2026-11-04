@@ -51,6 +51,10 @@ class ContainerInfoModel(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), index=True)
     port = db.Column(db.Integer)
     hostname = db.Column(db.String(255), index=True)
+    # Immutable worker ownership for every instance created after the
+    # placement-aware launcher migration.  Existing rows are backfilled to
+    # the named single-worker compatibility route by the migration.
+    worker_id = db.Column(db.String(32), nullable=False, default="primary", index=True)
     timestamp = db.Column(db.Integer)
     expires = db.Column(db.Integer)
     flag = db.Column(db.Text, default="")
@@ -59,6 +63,27 @@ class ContainerInfoModel(db.Model):
     user = relationship("Users", foreign_keys=[user_id])
 
     challenge = relationship(ContainerChallengeModel, foreign_keys=[challenge_id])
+
+
+class ContainerWorkerPlacementModel(db.Model):
+    """Durable team/user-to-worker binding; never recompute for lifecycle calls."""
+
+    __tablename__ = "container_worker_placement_model"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "event_id", "release_id", "scope_kind", "scope_id",
+            name="uq_container_worker_placement_scope",
+        ),
+        db.Index("idx_container_worker_placement_worker", "worker_id"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    event_id = db.Column(db.String(63), nullable=False)
+    release_id = db.Column(db.String(63), nullable=False)
+    scope_kind = db.Column(db.String(8), nullable=False)
+    scope_id = db.Column(db.Integer, nullable=False)
+    worker_id = db.Column(db.String(32), nullable=False)
+    assigned_at = db.Column(db.Integer, nullable=False)
 
 
 class ContainerSettingsModel(db.Model):

@@ -11,6 +11,7 @@ from .legacy_models import (
     ContainerFlagModel,
     ContainerInfoModel,
     ContainerSettingsModel,
+    ContainerWorkerPlacementModel,
 )
 
 __all__ = (
@@ -19,4 +20,5 @@ __all__ = (
     "ContainerFlagModel",
     "ContainerInfoModel",
     "ContainerSettingsModel",
+    "ContainerWorkerPlacementModel",
 )

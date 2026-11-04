@@ -7,13 +7,12 @@ SOURCE = (Path(__file__).resolve().parents[1] / "container_manager.py").read_tex
 
 
 class WorkerPoolIntegrationGuardTests(unittest.TestCase):
-    def test_manager_imports_and_validates_worker_pool_before_docker_use(self):
+    def test_legacy_manager_refuses_to_multiplex_a_shared_client(self):
         ast.parse(SOURCE)
         self.assertIn("from .worker_pool import load_worker_pool", SOURCE)
         self.assertGreaterEqual(SOURCE.count("load_worker_pool("), 2)
-        self.assertIn("Multi-worker Docker inventory is not enabled", SOURCE)
-        self.assertIn("placement-aware ", SOURCE)
-        self.assertIn("lifecycle routing is installed", SOURCE)
+        self.assertIn("Multi-worker Docker inventory requires WorkerPoolContainerManager", SOURCE)
+        self.assertIn("WorkerPoolContainerManager.validate_settings(settings)", SOURCE)
 
 
 if __name__ == "__main__":

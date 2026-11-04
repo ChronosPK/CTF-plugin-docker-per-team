@@ -11,6 +11,7 @@ from CTFd.plugins.migrations import upgrade
 
 from .admin_routes import admin_bp, set_container_manager as set_admin_manager
 from .container_manager import ContainerManager
+from .worker_pool_manager import WorkerPoolContainerManager
 from .helpers import (
     find_active_container,
     get_container_flag,
@@ -281,7 +282,9 @@ def load(app: Flask):
 
     global container_manager
     container_settings = seed_default_settings()
-    container_manager = ContainerManager(container_settings, app)
+    # The facade retains the named one-worker compatibility mode while making
+    # a declared worker pool durable and lifecycle-safe.
+    container_manager = WorkerPoolContainerManager(container_settings, app)
 
     base_bp = Blueprint(
         "containers",

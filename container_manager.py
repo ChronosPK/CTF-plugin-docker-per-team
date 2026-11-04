@@ -115,10 +115,12 @@ class ContainerManager:
         except RuntimePolicyError as err:
             raise ContainerException(str(err))
         if len(workers) != 1:
-            raise ContainerException(
-                "Multi-worker Docker inventory is not enabled until placement-aware "
-                "lifecycle routing is installed"
-            )
+            # The legacy manager remains single-daemon by construction.  The
+            # facade validates every declared worker independently instead of
+            # silently checking only the first endpoint.
+            from .worker_pool_manager import WorkerPoolContainerManager
+
+            return WorkerPoolContainerManager.validate_settings(settings)
 
         docker_base_url = (settings.get("docker_base_url") or "").strip()
         try:
@@ -195,9 +197,22 @@ class ContainerManager:
         except RuntimePolicyError as err:
             raise ContainerException(str(err))
 
-    def __init__(self, settings, app):
+    def __init__(self, settings, app, *, worker_spec=None, manage_expiration=True):
+        """Manage one Docker daemon.
+
+        ``WorkerPoolContainerManager`` creates one of these objects for each
+        immutable worker specification.  Keeping this class single-daemon is
+        deliberate: no request may mutate a shared ``self.client`` to point at
+        another worker while a concurrent lifecycle operation is in flight.
+        """
+        self._worker_spec = worker_spec
+        self._manage_expiration = bool(manage_expiration)
         try:
-            self.identity = RuntimeIdentity.from_environment(os.environ)
+            self.identity = (
+                worker_spec.identity
+                if worker_spec is not None
+                else RuntimeIdentity.from_environment(os.environ)
+            )
             self.allow_limited_local_daemon = allow_limited_local_daemon(
                 os.environ,
                 self.identity,
@@ -205,20 +220,30 @@ class ContainerManager:
         except RuntimePolicyError as err:
             raise ContainerException(str(err))
         self.settings = dict(settings)
+        if worker_spec is not None:
+            self.settings.update(
+                {
+                    "docker_base_url": worker_spec.docker_base_url,
+                    "docker_hostname": worker_spec.docker_hostname,
+                    "challenge_network": worker_spec.identity.challenge_network,
+                }
+            )
         self.settings["challenge_network"] = self.identity.challenge_network
-        try:
-            self.worker_pool = load_worker_pool(
-                os.environ,
-                self.identity,
-                self.settings,
-            )
-        except RuntimePolicyError as err:
-            raise ContainerException(str(err))
-        if len(self.worker_pool) != 1:
-            raise ContainerException(
-                "Multi-worker Docker inventory is not enabled until placement-aware "
-                "lifecycle routing is installed"
-            )
+        if worker_spec is not None:
+            self.worker_pool = (worker_spec,)
+        else:
+            try:
+                self.worker_pool = load_worker_pool(
+                    os.environ,
+                    self.identity,
+                    self.settings,
+                )
+            except RuntimePolicyError as err:
+                raise ContainerException(str(err))
+            if len(self.worker_pool) != 1:
+                raise ContainerException(
+                    "Multi-worker Docker inventory requires WorkerPoolContainerManager"
+                )
         try:
             self.hardening_profile = build_hardening_profile(self.settings)
             self.start_timeout_seconds = get_start_timeout_seconds(self.settings)
@@ -247,6 +272,14 @@ class ContainerManager:
 
     def initialize_connection(self, settings, app) -> None:
         self.settings = dict(settings)
+        if self._worker_spec is not None:
+            self.settings.update(
+                {
+                    "docker_base_url": self._worker_spec.docker_base_url,
+                    "docker_hostname": self._worker_spec.docker_hostname,
+                    "challenge_network": self._worker_spec.identity.challenge_network,
+                }
+            )
         self.settings["challenge_network"] = self.identity.challenge_network
         self.app = app
         self.expiration_seconds = self._get_expiration_seconds(self.settings)
@@ -334,7 +367,7 @@ class ContainerManager:
 
         EXPIRATION_CHECK_INTERVAL = 5
 
-        if self.expiration_seconds > 0:
+        if self._manage_expiration and self.expiration_seconds > 0:
             self.expiration_scheduler = BackgroundScheduler()
             self.expiration_scheduler.add_job(
                 func=self.kill_expired_containers,
@@ -757,7 +790,10 @@ class ContainerManager:
                 resource_limits,
             )
             self._wait_until_healthy(container)
-            port = self.get_container_port(container.id)
+            # The database record does not exist until after Docker has handed
+            # us the mapped port.  Looking it up through the public lifecycle
+            # method here would incorrectly return ``None`` on every launch.
+            port = self._get_container_port_from_container(container)
             if port is None:
                 raise ContainerException("Could not get container port")
             timestamp = int(time.time())
@@ -838,11 +874,19 @@ class ContainerManager:
             )
             if container is None:
                 return None
-            for port in list(container.ports.values()):
-                if port is not None:
-                    return port[0]["HostPort"]
+            return self._get_container_port_from_container(container)
         except (KeyError, IndexError):
             return None
+
+    @staticmethod
+    def _get_container_port_from_container(container) -> "str|None":
+        try:
+            for port in list((container.ports or {}).values()):
+                if port:
+                    return port[0]["HostPort"]
+        except (AttributeError, KeyError, IndexError, TypeError):
+            return None
+        return None
 
     @run_command
     def get_images(self) -> "list[str]|None":
@@ -890,6 +934,8 @@ class ContainerManager:
 
     def is_connected(self) -> bool:
         try:
+            if self.client is None:
+                self.initialize_connection(self.settings, self.app)
             self.client.ping()
             challenge_network = (self.settings.get("challenge_network") or "").strip()
             if challenge_network != self.identity.challenge_network:

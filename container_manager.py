@@ -700,6 +700,7 @@ class ContainerManager:
             "ctfd.challenge_id": str(challenge.id),
             "ctfd.scope": "team" if is_team else "user",
             "ctfd.scope_id": str(xid),
+            "ctfd.worker_id": self.worker_pool[0].worker_id,
             "ctfd.resource.memory_mb": str(
                 resource_limits["memory_limit_mb"]
             ),
@@ -747,6 +748,7 @@ class ContainerManager:
                 user_id=None if is_team else xid,
                 port=port,
                 hostname=(self.settings.get("docker_hostname", "") or "").strip() or None,
+                worker_id=self.worker_pool[0].worker_id,
                 flag=flag,
                 timestamp=timestamp,
                 expires=expires,
@@ -768,6 +770,7 @@ class ContainerManager:
                 "expires": expires,
                 "port": port,
                 "hostname": new_container_entry.hostname,
+                "worker_id": new_container_entry.worker_id,
                 "resources": applied_resources,
             }
         except IntegrityError:

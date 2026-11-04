@@ -37,6 +37,7 @@ from .runtime_policy import (
     validate_docker_endpoint,
     validate_image_reference,
 )
+from .worker_pool import load_worker_pool
 
 
 def generate_random_flag(challenge):
@@ -110,8 +111,14 @@ class ContainerManager:
             )
             profile = build_hardening_profile(settings)
             get_start_timeout_seconds(settings)
+            workers = load_worker_pool(os.environ, identity, settings)
         except RuntimePolicyError as err:
             raise ContainerException(str(err))
+        if len(workers) != 1:
+            raise ContainerException(
+                "Multi-worker Docker inventory is not enabled until placement-aware "
+                "lifecycle routing is installed"
+            )
 
         docker_base_url = (settings.get("docker_base_url") or "").strip()
         try:
@@ -199,6 +206,19 @@ class ContainerManager:
             raise ContainerException(str(err))
         self.settings = dict(settings)
         self.settings["challenge_network"] = self.identity.challenge_network
+        try:
+            self.worker_pool = load_worker_pool(
+                os.environ,
+                self.identity,
+                self.settings,
+            )
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err))
+        if len(self.worker_pool) != 1:
+            raise ContainerException(
+                "Multi-worker Docker inventory is not enabled until placement-aware "
+                "lifecycle routing is installed"
+            )
         try:
             self.hardening_profile = build_hardening_profile(self.settings)
             self.start_timeout_seconds = get_start_timeout_seconds(self.settings)

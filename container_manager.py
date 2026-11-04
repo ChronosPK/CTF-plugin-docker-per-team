@@ -746,7 +746,7 @@ class ContainerManager:
                 team_id=xid if is_team else None,
                 user_id=None if is_team else xid,
                 port=port,
-                hostname=None,
+                hostname=(self.settings.get("docker_hostname", "") or "").strip() or None,
                 flag=flag,
                 timestamp=timestamp,
                 expires=expires,
@@ -767,6 +767,7 @@ class ContainerManager:
                 "container": container,
                 "expires": expires,
                 "port": port,
+                "hostname": new_container_entry.hostname,
                 "resources": applied_resources,
             }
         except IntegrityError:

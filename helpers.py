@@ -94,12 +94,16 @@ def is_team_mode():
     return get_config("user_mode") == TEAMS_MODE
 
 
-def build_connection_payload(container_manager, challenge, port, expires):
+def build_connection_payload(container_manager, challenge, port, expires, *, hostname=None):
     connect = (challenge.connection_type or "tcp").strip().lower()
 
+    # Persisted instance hostname wins.  This is essential once a team is
+    # bound to a worker: a later pool/config change must not send it to another
+    # worker's public address.
+    persisted_hostname = str(hostname or "").strip()
     configured_hostname = (container_manager.settings.get("docker_hostname", "") or "").strip()
     request_hostname = request.host.split(":", 1)[0] if has_request_context() else ""
-    hostname = configured_hostname or request_hostname
+    hostname = persisted_hostname or configured_hostname or request_hostname
 
     if connect == "tcp":
         endpoint = f"{hostname}:{port}" if hostname else str(port)
@@ -279,6 +283,7 @@ def renew_container(container_manager, chal_id, xid, is_team):
                     challenge,
                     running_container.port,
                     running_container.expires,
+                    hostname=running_container.hostname,
                 ),
             }
         )
@@ -344,6 +349,7 @@ def create_container(container_manager, chal_id, xid, is_team):
                         challenge,
                         running_container.port,
                         running_container.expires,
+                        hostname=running_container.hostname,
                     ),
                 }
             )
@@ -362,6 +368,7 @@ def create_container(container_manager, chal_id, xid, is_team):
                 challenge,
                 created_container["port"],
                 created_container["expires"],
+                hostname=created_container.get("hostname"),
             ),
         }
     )
@@ -390,6 +397,7 @@ def view_container_info(container_manager, chal_id, xid, is_team):
                             challenge,
                             running_container.port,
                             running_container.expires,
+                            hostname=running_container.hostname,
                         ),
                     }
                 )

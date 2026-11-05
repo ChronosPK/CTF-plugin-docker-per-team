@@ -193,6 +193,26 @@ class WorkerPoolContainerManager:
             scope_id=int(xid),
         )
 
+    def _reserved_instances_per_scope(self) -> int:
+        """Return the configured per-account instance budget.
+
+        A worker assignment is durable for its team/user.  Therefore, a first
+        placement must reserve the account's whole active-container allowance,
+        rather than admitting only the one challenge that happened to launch
+        first.  Otherwise three concurrent first launches can make a worker
+        exceed its advertised cap even when aggregate capacity was sufficient.
+        Changing this setting during an event is deliberately not a capacity
+        expansion mechanism; release configuration must keep this cap stable
+        while durable placements are active.
+        """
+        try:
+            value = int(self.settings.get("max_containers", 3))
+        except (TypeError, ValueError) as err:
+            raise ContainerException("Container maximum must be an integer") from err
+        if value <= 0:
+            raise ContainerException("Container maximum must be greater than zero")
+        return value
+
     def _worker_for_scope(self, xid, is_team) -> WorkerSpec:
         key = self._scope_key(xid, is_team)
 
@@ -210,6 +230,7 @@ class WorkerPoolContainerManager:
                     raise ContainerException(str(err)) from err
 
             now = int(time.time())
+            reserved_per_scope = self._reserved_instances_per_scope()
             eligible_loads = []
             for worker in self.worker_pool:
                 # Rows are the admission ledger.  We intentionally count an
@@ -219,8 +240,22 @@ class WorkerPoolContainerManager:
                     ContainerInfoModel.worker_id == worker.worker_id,
                     ContainerInfoModel.expires > now,
                 ).count()
-                if active < worker.max_active_instances:
-                    eligible_loads.append((active, worker.worker_id))
+                # A durable placement must reserve every instance the account
+                # is allowed to start.  Counting only active rows makes the
+                # first of three parallel launches appear to cost one slot;
+                # the same team can then overflow an otherwise full worker.
+                # Existing pre-placement rows remain a conservative floor.
+                reserved = (
+                    ContainerWorkerPlacementModel.query.filter_by(
+                        event_id=key.event_id,
+                        release_id=key.release_id,
+                        worker_id=worker.worker_id,
+                    ).count()
+                    * reserved_per_scope
+                )
+                committed_load = max(active, reserved)
+                if committed_load + reserved_per_scope <= worker.max_active_instances:
+                    eligible_loads.append((committed_load, worker.worker_id))
             # Teams retain one durable worker, so each new team may create up
             # to the per-team container cap on that worker.  A hash across all
             # non-full workers has avoidable statistical skew and can reject a
@@ -230,11 +265,11 @@ class WorkerPoolContainerManager:
             # prevents later migration.
             eligible = []
             if eligible_loads:
-                minimum_load = min(active for active, _ in eligible_loads)
+                minimum_load = min(load for load, _ in eligible_loads)
                 eligible = [
                     worker_id
-                    for active, worker_id in eligible_loads
-                    if active == minimum_load
+                    for load, worker_id in eligible_loads
+                    if load == minimum_load
                 ]
             try:
                 worker = choose_initial_worker(key, self.worker_pool, eligible_worker_ids=eligible)

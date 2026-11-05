@@ -29,8 +29,11 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
     def test_worker_capacity_is_enforced_before_new_placement(self):
         self.assertIn("worker.max_active_instances", SOURCE)
         self.assertIn("ContainerInfoModel.expires > now", SOURCE)
-        self.assertIn("minimum_load = min(active for active, _ in eligible_loads)", SOURCE)
-        self.assertIn("if active == minimum_load", SOURCE)
+        self.assertIn("minimum_load = min(load for load, _ in eligible_loads)", SOURCE)
+        self.assertIn("if load == minimum_load", SOURCE)
+        self.assertIn("def _reserved_instances_per_scope", SOURCE)
+        self.assertIn("committed_load + reserved_per_scope <= worker.max_active_instances", SOURCE)
+        self.assertIn("ContainerWorkerPlacementModel.query.filter_by(", SOURCE)
         self.assertIn("no healthy Docker worker has launch capacity", (ROOT / "placement.py").read_text(encoding="utf-8"))
 
     def test_concurrent_first_launch_adopts_the_unique_constraint_winner(self):

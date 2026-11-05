@@ -36,6 +36,12 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
         self.assertIn("ContainerWorkerPlacementModel.query.filter_by(", SOURCE)
         self.assertIn("no healthy Docker worker has launch capacity", (ROOT / "placement.py").read_text(encoding="utf-8"))
 
+    def test_worker_capacity_query_refreshes_after_global_admission_lock(self):
+        """A waiting request must not use a pre-lock REPEATABLE READ snapshot."""
+        start = SOURCE.index("def select_or_create():")
+        capacity_query = SOURCE.index("eligible_loads = []", start)
+        self.assertIn("db.session.rollback()", SOURCE[start:capacity_query])
+
     def test_concurrent_first_launch_adopts_the_unique_constraint_winner(self):
         self.assertIn("from sqlalchemy.exc import IntegrityError", SOURCE)
         self.assertIn("except IntegrityError", SOURCE)

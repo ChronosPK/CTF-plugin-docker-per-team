@@ -217,6 +217,16 @@ class WorkerPoolContainerManager:
         key = self._scope_key(xid, is_team)
 
         def select_or_create():
+            # ``create_container`` has already performed read-only account and
+            # challenge lookups before it waits for this *global* admission
+            # lock.  Under MariaDB's default REPEATABLE READ isolation, that
+            # session can therefore retain a snapshot from before another
+            # team committed its placement.  Capacity must be computed after
+            # acquiring the lock from a fresh snapshot; otherwise concurrent
+            # first launches can select a worker that is already full.
+            # No write is pending at this point (the placement is created
+            # below), so this cannot discard an admission decision.
+            db.session.rollback()
             placement = ContainerWorkerPlacementModel.query.filter_by(
                 event_id=key.event_id,
                 release_id=key.release_id,

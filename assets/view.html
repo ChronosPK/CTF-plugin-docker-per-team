@@ -1,7 +1,13 @@
 {% extends "challenge.html" %} {% block connection_info %}
 <div class="mb-3 text-center deployment-actions">
-  <!-- I dont event know why <script> not work in core-beta so .... -->
-  <img class="d-none" src onerror="view_container_info({{ challenge.id }})" />
+  {#
+    CTFd injects this template into an already-loaded modal.  An empty src
+    does not consistently fire an error event across browsers, leaving all
+    deployment buttons hidden.  A tiny data URI reliably completes after the
+    template is attached, so the external view.js can fetch the instance
+    state and reveal the appropriate action.
+  #}
+  <img class="d-none" aria-hidden="true" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" onload="setTimeout(function(){ view_container_info({{ challenge.id }}); }, 0)" />
   <div class="alert alert-primary" id="deployment-info"></div>
   <span>
     <button

@@ -231,6 +231,46 @@ class WorkerPoolContainerManager:
             query = query.filter(ContainerInfoModel.user_id == key.scope_id)
         return query.count()
 
+    @staticmethod
+    def _active_scope_instances_any_worker(key: PlacementKey, now: int) -> int:
+        """Count live instances for a scope without assuming its worker.
+
+        A draining scope can move its placement while an earlier instance is
+        still running on the old worker.  Idle-placement cleanup must retain
+        that placement until *all* of the scope's instances have expired.
+        """
+        query = ContainerInfoModel.query.filter(ContainerInfoModel.expires > now)
+        if key.scope_kind == "team":
+            query = query.filter(ContainerInfoModel.team_id == key.scope_id)
+        else:
+            query = query.filter(ContainerInfoModel.user_id == key.scope_id)
+        return query.count()
+
+    def _release_fully_idle_placements(self, now: int) -> None:
+        """Drop current-release reservations that no longer own an instance.
+
+        Placements reserve a whole squad budget while it has an active
+        container.  Retaining them indefinitely turns a finite worker pool
+        into a historical-account cap.  The grace period prevents a parallel
+        first launch from being mistaken for an idle scope before it writes
+        its ContainerInfoModel record.
+        """
+        release_before = now - 60
+        placements = ContainerWorkerPlacementModel.query.filter_by(
+            event_id=self.identity.event_id,
+            release_id=self.identity.release_id,
+        ).filter(ContainerWorkerPlacementModel.assigned_at <= release_before).all()
+        for placement in placements:
+            key = PlacementKey(
+                event_id=placement.event_id,
+                release_id=placement.release_id,
+                scope_kind=placement.scope_kind,
+                scope_id=placement.scope_id,
+            )
+            if self._active_scope_instances_any_worker(key, now):
+                continue
+            db.session.delete(placement)
+
     def _select_admitted_worker(self, key: PlacementKey, now: int) -> WorkerSpec:
         """Choose a non-draining worker with room for one complete scope."""
         reserved_per_scope = self._reserved_instances_per_scope()
@@ -396,28 +436,7 @@ class WorkerPoolContainerManager:
                         # Do not delete the DB evidence when an isolated worker
                         # is unavailable; the next expiry pass can retry it.
                         continue
-                draining_workers = {
-                    worker.worker_id for worker in self.worker_pool if worker.draining
-                }
-                if not draining_workers:
-                    return
-                for placement in ContainerWorkerPlacementModel.query.filter(
-                    ContainerWorkerPlacementModel.worker_id.in_(draining_workers)
-                ).all():
-                    key = PlacementKey(
-                        event_id=placement.event_id,
-                        release_id=placement.release_id,
-                        scope_kind=placement.scope_kind,
-                        scope_id=placement.scope_id,
-                    )
-                    if self._active_scope_instances(key, placement.worker_id, now):
-                        continue
-                    try:
-                        self._move_idle_placement(placement, key, now)
-                    except ContainerException:
-                        # Capacity is a hard admission boundary. Keep this
-                        # idle placement until a non-draining worker has room.
-                        continue
+                self._release_fully_idle_placements(now)
                 db.session.commit()
             self._with_advisory_lock("docker-per-team:expire-scan", cleanup)
 

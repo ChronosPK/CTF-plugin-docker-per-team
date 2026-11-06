@@ -47,7 +47,16 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
         self.assertIn("def _move_idle_placement", SOURCE)
         self.assertIn("if not worker.draining:", SOURCE)
         self.assertIn("every *new* launch avoids a draining worker", SOURCE)
-        self.assertIn("draining_workers", SOURCE)
+        self.assertIn("self._release_fully_idle_placements(now)", SOURCE)
+
+    def test_idle_placement_cleanup_requires_no_active_instance_on_any_worker(self):
+        self.assertIn("def _active_scope_instances_any_worker", SOURCE)
+        self.assertIn("ContainerInfoModel.expires > now", SOURCE)
+        self.assertIn("def _release_fully_idle_placements", SOURCE)
+        self.assertIn("assigned_at <= release_before", SOURCE)
+        self.assertIn("if self._active_scope_instances_any_worker(key, now):", SOURCE)
+        self.assertIn("db.session.delete(placement)", SOURCE)
+        self.assertIn("self._release_fully_idle_placements(now)", SOURCE)
 
     def test_expiry_scheduler_starts_without_worker_connection(self):
         init_start = SOURCE.index("def __init__")

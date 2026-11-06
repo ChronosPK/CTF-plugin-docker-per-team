@@ -926,6 +926,8 @@ class ContainerManager:
             )
             if container is not None:
                 container.kill()
+        except docker.errors.NotFound:
+            pass
         except docker.errors.APIError as err:
             raise ContainerException(f"Docker API error: {err.explanation}")
 

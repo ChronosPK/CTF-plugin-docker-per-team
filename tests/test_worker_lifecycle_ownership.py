@@ -14,6 +14,15 @@ class WorkerLifecycleOwnershipTests(unittest.TestCase):
         self.assertIn("bound to another Docker worker", SOURCE)
         self.assertGreaterEqual(SOURCE.count("worker_id=container_info.worker_id"), 2)
 
+    def test_missing_container_cleanup_is_idempotent(self):
+        kill_method = SOURCE[SOURCE.index("def kill_container(self, container_id: str)"):]
+        self.assertIn("except docker.errors.NotFound:", kill_method)
+        self.assertLess(
+            kill_method.index("except docker.errors.NotFound:"),
+            kill_method.index("except docker.errors.APIError as err:"),
+        )
+        self.assertIn("cleanup_container_records(container_info)", kill_method)
+
 
 if __name__ == "__main__":
     unittest.main()

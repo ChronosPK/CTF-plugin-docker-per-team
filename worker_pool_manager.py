@@ -295,11 +295,13 @@ class WorkerPoolContainerManager:
                     worker = require_persisted_worker(placement.worker_id, self.worker_pool)
                 except RuntimePolicyError as err:
                     raise ContainerException(str(err)) from err
-                if not worker.draining or self._active_scope_instances(
-                    key, worker.worker_id, int(time.time())
-                ):
+                if not worker.draining:
                     return worker
                 try:
+                    # A running container retains its own worker_id in
+                    # ContainerInfoModel, so lifecycle actions remain routed
+                    # to the original worker. Move this scope's placement now
+                    # so every *new* launch avoids a draining worker.
                     worker = self._move_idle_placement(placement, key, int(time.time()))
                     db.session.commit()
                     return worker

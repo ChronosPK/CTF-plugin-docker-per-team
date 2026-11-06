@@ -42,11 +42,11 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
         placement_query = SOURCE.index("placement = ContainerWorkerPlacementModel.query", start)
         self.assertIn("db.session.rollback()", SOURCE[start:placement_query])
 
-    def test_draining_workers_admit_no_new_scopes_and_move_only_when_idle(self):
+    def test_draining_workers_admit_no_new_instances_and_move_scope_immediately(self):
         self.assertIn("if worker.draining:", SOURCE)
-        self.assertIn("def _active_scope_instances", SOURCE)
         self.assertIn("def _move_idle_placement", SOURCE)
-        self.assertIn("if not worker.draining or self._active_scope_instances", SOURCE)
+        self.assertIn("if not worker.draining:", SOURCE)
+        self.assertIn("every *new* launch avoids a draining worker", SOURCE)
         self.assertIn("draining_workers", SOURCE)
 
     def test_concurrent_first_launch_adopts_the_unique_constraint_winner(self):

@@ -342,6 +342,12 @@ class WorkerPoolContainerManager:
                 except RuntimePolicyError as err:
                     raise ContainerException(str(err)) from err
                 if not worker.draining:
+                    # A placement may be old yet about to create another
+                    # container. Refresh its short cleanup lease while the
+                    # global admission lock is held so it cannot be removed
+                    # between selection and ContainerInfoModel persistence.
+                    placement.assigned_at = int(time.time())
+                    db.session.commit()
                     return worker
                 try:
                     # A running container retains its own worker_id in
@@ -436,8 +442,18 @@ class WorkerPoolContainerManager:
                         # Do not delete the DB evidence when an isolated worker
                         # is unavailable; the next expiry pass can retry it.
                         continue
-                self._release_fully_idle_placements(now)
-                db.session.commit()
+                def release_idle_placements():
+                    # The expiry scan has already read container rows. Start
+                    # the admission-critical cleanup from a fresh snapshot,
+                    # then serialize it with a concurrent scope selection.
+                    db.session.rollback()
+                    self._release_fully_idle_placements(now)
+                    db.session.commit()
+
+                self._with_advisory_lock(
+                    "docker-per-team:worker-placement-admission",
+                    release_idle_placements,
+                )
             self._with_advisory_lock("docker-per-team:expire-scan", cleanup)
 
     def get_running_container_ids(self) -> set[str]:

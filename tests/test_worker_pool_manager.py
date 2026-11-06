@@ -57,6 +57,8 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
         self.assertIn("if self._active_scope_instances_any_worker(key, now):", SOURCE)
         self.assertIn("db.session.delete(placement)", SOURCE)
         self.assertIn("self._release_fully_idle_placements(now)", SOURCE)
+        self.assertIn('"docker-per-team:worker-placement-admission",', SOURCE)
+        self.assertIn("placement.assigned_at = int(time.time())", SOURCE)
 
     def test_expiry_scheduler_starts_without_worker_connection(self):
         init_start = SOURCE.index("def __init__")

@@ -674,6 +674,7 @@ class ContainerManager:
             kwargs = build_hardening_profile(
                 self.settings,
                 resource_overrides,
+                challenge_name=challenge.name,
             )
         except RuntimePolicyError as err:
             raise ContainerException(str(err))

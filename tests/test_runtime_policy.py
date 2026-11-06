@@ -483,6 +483,26 @@ class HardeningProfileTests(unittest.TestCase):
         self.assertEqual(profile["pids_limit"], 96)
         self.assertIn("size=16m", profile["tmpfs"]["/tmp"])
 
+    def test_helioform_gets_only_its_reviewed_writable_runbook_tmpfs(self):
+        profile = runtime_policy.build_hardening_profile(
+            {}, challenge_name="Helioform Relay"
+        )
+
+        self.assertTrue(profile["read_only"])
+        self.assertEqual(
+            profile["tmpfs"]["/var/lib/helioform/runbooks"],
+            "rw,noexec,nosuid,nodev,size=1m,mode=1777",
+        )
+        self.assertEqual(set(profile["tmpfs"]), {
+            "/tmp", "/var/lib/helioform/runbooks"
+        })
+
+    def test_unlisted_challenge_cannot_receive_helioform_tmpfs(self):
+        profile = runtime_policy.build_hardening_profile(
+            {}, challenge_name="Any Other Challenge"
+        )
+        self.assertEqual(set(profile["tmpfs"]), {"/tmp"})
+
     def test_per_challenge_resources_cannot_exceed_global_ceilings(self):
         settings = {
             "container_maxmemory": "1024",

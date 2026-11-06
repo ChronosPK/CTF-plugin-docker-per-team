@@ -55,6 +55,17 @@ DEFAULT_LOG_MAX_SIZE = "10m"
 DEFAULT_LOG_MAX_FILES = 3
 DEFAULT_START_TIMEOUT_SECONDS = 60
 
+# These mounts are deliberately exceptional: the launcher keeps challenge roots
+# read-only and only a reviewed challenge may request a writable application
+# directory.  Helioform's final protocol stage writes a small, interpreted
+# runbook exactly at this path; a generic writable-volume escape hatch would
+# weaken the isolation policy for every other challenge.
+CHALLENGE_TMPFS_MOUNTS = {
+    "Helioform Relay": {
+        "/var/lib/helioform/runbooks": "rw,noexec,nosuid,nodev,size=1m,mode=1777",
+    },
+}
+
 RESOURCE_OVERRIDE_FIELDS = {
     "memory_limit_mb": ("container_maxmemory", DEFAULT_MEMORY_MB, "integer"),
     "cpu_limit": ("container_maxcpu", DEFAULT_CPU_LIMIT, "number"),
@@ -525,6 +536,8 @@ def resolve_resource_limits(
 def build_hardening_profile(
     settings: Mapping[str, str],
     overrides: Mapping[str, object] | None = None,
+    *,
+    challenge_name: str | None = None,
 ) -> dict:
     """Build the Docker SDK kwargs that every challenge container receives."""
 
@@ -544,16 +557,19 @@ def build_hardening_profile(
             "container_log_max_size must be a positive size ending in k, m, or g"
         )
 
+    tmpfs = {
+        "/tmp": (
+            "rw,noexec,nosuid,nodev,"
+            f"size={tmpfs_size_mb}m,mode=1777"
+        )
+    }
+    tmpfs.update(CHALLENGE_TMPFS_MOUNTS.get(challenge_name or "", {}))
+
     return {
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true"],
         "read_only": True,
-        "tmpfs": {
-            "/tmp": (
-                "rw,noexec,nosuid,nodev,"
-                f"size={tmpfs_size_mb}m,mode=1777"
-            )
-        },
+        "tmpfs": tmpfs,
         "pids_limit": pids_limit,
         "mem_limit": f"{memory_mb}m",
         "memswap_limit": f"{memory_mb}m",

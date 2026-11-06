@@ -75,6 +75,19 @@ class WorkerPoolTests(unittest.TestCase):
         self.assertEqual([entry.worker_id for entry in pool], ["west-a", "west-b"])
         self.assertEqual(pool_module.worker_by_id(pool, "west-b").docker_hostname, "w2.ctf.example")
 
+    def test_draining_is_explicit_and_boolean(self):
+        first = worker("west-a", "ssh://ctfworker@10.26.0.11", "csctf26_west_a", "10.26.0.11", "w1.ctf.example")
+        first["draining"] = True
+        pool = pool_module.load_worker_pool(
+            {pool_module.WORKER_POOL_ENV: json.dumps([first])}, identity(), {}
+        )
+        self.assertTrue(pool[0].draining)
+        first["draining"] = "true"
+        with self.assertRaises(policy.RuntimePolicyError):
+            pool_module.load_worker_pool(
+                {pool_module.WORKER_POOL_ENV: json.dumps([first])}, identity(), {}
+            )
+
     def test_pool_rejects_duplicate_network_and_unknown_placement(self):
         encoded = json.dumps(
             [

@@ -213,6 +213,63 @@ class WorkerPoolContainerManager:
             raise ContainerException("Container maximum must be greater than zero")
         return value
 
+    @staticmethod
+    def _active_scope_instances(key: PlacementKey, worker_id: str, now: int) -> int:
+        query = ContainerInfoModel.query.filter(
+            ContainerInfoModel.worker_id == worker_id,
+            ContainerInfoModel.expires > now,
+        )
+        if key.scope_kind == "team":
+            query = query.filter(ContainerInfoModel.team_id == key.scope_id)
+        else:
+            query = query.filter(ContainerInfoModel.user_id == key.scope_id)
+        return query.count()
+
+    def _select_admitted_worker(self, key: PlacementKey, now: int) -> WorkerSpec:
+        """Choose a non-draining worker with room for one complete scope."""
+        reserved_per_scope = self._reserved_instances_per_scope()
+        eligible_loads = []
+        for worker in self.worker_pool:
+            if worker.draining:
+                continue
+            active = ContainerInfoModel.query.filter(
+                ContainerInfoModel.worker_id == worker.worker_id,
+                ContainerInfoModel.expires > now,
+            ).count()
+            reserved = (
+                ContainerWorkerPlacementModel.query.filter_by(
+                    event_id=key.event_id,
+                    release_id=key.release_id,
+                    worker_id=worker.worker_id,
+                ).count()
+                * reserved_per_scope
+            )
+            committed_load = max(active, reserved)
+            if committed_load + reserved_per_scope <= worker.max_active_instances:
+                eligible_loads.append((committed_load, worker.worker_id))
+        minimum_load = min((load for load, _ in eligible_loads), default=None)
+        eligible = [worker_id for load, worker_id in eligible_loads if load == minimum_load]
+        try:
+            return choose_initial_worker(
+                key,
+                self.worker_pool,
+                eligible_worker_ids=eligible,
+            )
+        except RuntimePolicyError as err:
+            raise ContainerException(str(err)) from err
+
+    def _move_idle_placement(
+        self,
+        placement: ContainerWorkerPlacementModel,
+        key: PlacementKey,
+        now: int,
+    ) -> WorkerSpec:
+        worker = self._select_admitted_worker(key, now)
+        placement.worker_id = worker.worker_id
+        placement.assigned_at = now
+        db.session.flush()
+        return worker
+
     def _worker_for_scope(self, xid, is_team) -> WorkerSpec:
         key = self._scope_key(xid, is_team)
 
@@ -235,56 +292,23 @@ class WorkerPoolContainerManager:
             ).first()
             if placement is not None:
                 try:
-                    return require_persisted_worker(placement.worker_id, self.worker_pool)
+                    worker = require_persisted_worker(placement.worker_id, self.worker_pool)
                 except RuntimePolicyError as err:
                     raise ContainerException(str(err)) from err
+                if not worker.draining or self._active_scope_instances(
+                    key, worker.worker_id, int(time.time())
+                ):
+                    return worker
+                try:
+                    worker = self._move_idle_placement(placement, key, int(time.time()))
+                    db.session.commit()
+                    return worker
+                except Exception:
+                    db.session.rollback()
+                    raise
 
             now = int(time.time())
-            reserved_per_scope = self._reserved_instances_per_scope()
-            eligible_loads = []
-            for worker in self.worker_pool:
-                # Rows are the admission ledger.  We intentionally count an
-                # expired-but-not-yet-pruned row conservatively until the
-                # expiry job has removed it.
-                active = ContainerInfoModel.query.filter(
-                    ContainerInfoModel.worker_id == worker.worker_id,
-                    ContainerInfoModel.expires > now,
-                ).count()
-                # A durable placement must reserve every instance the account
-                # is allowed to start.  Counting only active rows makes the
-                # first of three parallel launches appear to cost one slot;
-                # the same team can then overflow an otherwise full worker.
-                # Existing pre-placement rows remain a conservative floor.
-                reserved = (
-                    ContainerWorkerPlacementModel.query.filter_by(
-                        event_id=key.event_id,
-                        release_id=key.release_id,
-                        worker_id=worker.worker_id,
-                    ).count()
-                    * reserved_per_scope
-                )
-                committed_load = max(active, reserved)
-                if committed_load + reserved_per_scope <= worker.max_active_instances:
-                    eligible_loads.append((committed_load, worker.worker_id))
-            # Teams retain one durable worker, so each new team may create up
-            # to the per-team container cap on that worker.  A hash across all
-            # non-full workers has avoidable statistical skew and can reject a
-            # 600x3 launch even though aggregate capacity is exactly 1,800.
-            # Select only the least-loaded eligible workers; the existing
-            # digest remains a deterministic tie-breaker and the persisted row
-            # prevents later migration.
-            eligible = []
-            if eligible_loads:
-                minimum_load = min(load for load, _ in eligible_loads)
-                eligible = [
-                    worker_id
-                    for load, worker_id in eligible_loads
-                    if load == minimum_load
-                ]
-            try:
-                worker = choose_initial_worker(key, self.worker_pool, eligible_worker_ids=eligible)
-            except RuntimePolicyError as err:
-                raise ContainerException(str(err)) from err
+            worker = self._select_admitted_worker(key, now)
             db.session.add(
                 ContainerWorkerPlacementModel(
                     event_id=key.event_id,
@@ -364,6 +388,29 @@ class WorkerPoolContainerManager:
                         # Do not delete the DB evidence when an isolated worker
                         # is unavailable; the next expiry pass can retry it.
                         continue
+                draining_workers = {
+                    worker.worker_id for worker in self.worker_pool if worker.draining
+                }
+                if not draining_workers:
+                    return
+                for placement in ContainerWorkerPlacementModel.query.filter(
+                    ContainerWorkerPlacementModel.worker_id.in_(draining_workers)
+                ).all():
+                    key = PlacementKey(
+                        event_id=placement.event_id,
+                        release_id=placement.release_id,
+                        scope_kind=placement.scope_kind,
+                        scope_id=placement.scope_id,
+                    )
+                    if self._active_scope_instances(key, placement.worker_id, now):
+                        continue
+                    try:
+                        self._move_idle_placement(placement, key, now)
+                    except ContainerException:
+                        # Capacity is a hard admission boundary. Keep this
+                        # idle placement until a non-draining worker has room.
+                        continue
+                db.session.commit()
             self._with_advisory_lock("docker-per-team:expire-scan", cleanup)
 
     def get_running_container_ids(self) -> set[str]:
@@ -397,6 +444,7 @@ class WorkerPoolContainerManager:
                     "worker_id": worker.worker_id,
                     "hostname": worker.docker_hostname,
                     "max_active_instances": worker.max_active_instances,
+                    "draining": worker.draining,
                     "connected": self._managers[worker.worker_id].client is not None,
                 }
                 for worker in self.worker_pool

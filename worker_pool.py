@@ -37,6 +37,7 @@ class WorkerSpec:
     docker_hostname: str
     max_active_instances: int
     identity: RuntimeIdentity
+    draining: bool = False
 
 
 def _required_string(raw: object, name: str) -> str:
@@ -61,6 +62,12 @@ def _positive_int(raw: object, name: str) -> int:
     if value <= 0:
         raise RuntimePolicyError(f"worker {name} must be greater than zero")
     return value
+
+
+def _draining(raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    raise RuntimePolicyError("worker draining must be a boolean")
 
 
 def _worker_identity(base: RuntimeIdentity, item: Mapping[str, object]) -> RuntimeIdentity:
@@ -100,6 +107,7 @@ def _parse_item(item: object, base_identity: RuntimeIdentity) -> WorkerSpec:
             item.get("max_active_instances"), "max_active_instances"
         ),
         identity=identity,
+        draining=_draining(item.get("draining", False)),
     )
 
 

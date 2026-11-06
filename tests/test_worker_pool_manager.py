@@ -29,7 +29,7 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
     def test_worker_capacity_is_enforced_before_new_placement(self):
         self.assertIn("worker.max_active_instances", SOURCE)
         self.assertIn("ContainerInfoModel.expires > now", SOURCE)
-        self.assertIn("minimum_load = min(load for load, _ in eligible_loads)", SOURCE)
+        self.assertIn("minimum_load = min((load for load, _ in eligible_loads), default=None)", SOURCE)
         self.assertIn("if load == minimum_load", SOURCE)
         self.assertIn("def _reserved_instances_per_scope", SOURCE)
         self.assertIn("committed_load + reserved_per_scope <= worker.max_active_instances", SOURCE)
@@ -39,8 +39,15 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
     def test_worker_capacity_query_refreshes_after_global_admission_lock(self):
         """A waiting request must not use a pre-lock REPEATABLE READ snapshot."""
         start = SOURCE.index("def select_or_create():")
-        capacity_query = SOURCE.index("eligible_loads = []", start)
-        self.assertIn("db.session.rollback()", SOURCE[start:capacity_query])
+        placement_query = SOURCE.index("placement = ContainerWorkerPlacementModel.query", start)
+        self.assertIn("db.session.rollback()", SOURCE[start:placement_query])
+
+    def test_draining_workers_admit_no_new_scopes_and_move_only_when_idle(self):
+        self.assertIn("if worker.draining:", SOURCE)
+        self.assertIn("def _active_scope_instances", SOURCE)
+        self.assertIn("def _move_idle_placement", SOURCE)
+        self.assertIn("if not worker.draining or self._active_scope_instances", SOURCE)
+        self.assertIn("draining_workers", SOURCE)
 
     def test_concurrent_first_launch_adopts_the_unique_constraint_winner(self):
         self.assertIn("from sqlalchemy.exc import IntegrityError", SOURCE)

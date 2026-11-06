@@ -48,6 +48,7 @@ class WorkerPoolContainerManager:
             worker.worker_id: self._new_worker_manager(worker) for worker in self.worker_pool
         }
         self.connection_error = "Connection deferred until a container action is requested."
+        self._start_expiration_scheduler(app)
 
     @staticmethod
     def _expiration_seconds(settings) -> int:
@@ -83,6 +84,19 @@ class WorkerPoolContainerManager:
             self.expiration_scheduler.shutdown()
         except (SchedulerNotRunningError, AttributeError):
             pass
+
+    def _start_expiration_scheduler(self, app):
+        """Run expiry cleanup without requiring every worker to be online."""
+        self._shutdown_expiration_scheduler()
+        self.expiration_scheduler = BackgroundScheduler()
+        self.expiration_scheduler.add_job(
+            func=self.kill_expired_containers,
+            args=(app,),
+            trigger="interval",
+            seconds=5,
+        )
+        self.expiration_scheduler.start()
+        atexit.register(self._shutdown_expiration_scheduler)
 
     @staticmethod
     def validate_settings(settings):
@@ -156,15 +170,7 @@ class WorkerPoolContainerManager:
             raise
 
         self.connection_error = None
-        self.expiration_scheduler = BackgroundScheduler()
-        self.expiration_scheduler.add_job(
-            func=self.kill_expired_containers,
-            args=(app,),
-            trigger="interval",
-            seconds=5,
-        )
-        self.expiration_scheduler.start()
-        atexit.register(self._shutdown_expiration_scheduler)
+        self._start_expiration_scheduler(app)
 
     def _with_advisory_lock(self, name, func):
         engine = db.engine

@@ -49,6 +49,12 @@ class WorkerPoolManagerContractTests(unittest.TestCase):
         self.assertIn("every *new* launch avoids a draining worker", SOURCE)
         self.assertIn("draining_workers", SOURCE)
 
+    def test_expiry_scheduler_starts_without_worker_connection(self):
+        init_start = SOURCE.index("def __init__")
+        worker_settings = SOURCE.index("def _new_worker_manager", init_start)
+        self.assertIn("self._start_expiration_scheduler(app)", SOURCE[init_start:worker_settings])
+        self.assertIn("Run expiry cleanup without requiring every worker to be online.", SOURCE)
+
     def test_concurrent_first_launch_adopts_the_unique_constraint_winner(self):
         self.assertIn("from sqlalchemy.exc import IntegrityError", SOURCE)
         self.assertIn("except IntegrityError", SOURCE)
